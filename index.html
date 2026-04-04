@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>🚗 藍牙循跡車 APP</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 防止雙擊放大等手機預設行為 */
+        button { touch-action: manipulation; }
+        .log-box { font-family: monospace; font-size: 0.85rem; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 pb-10">
+
+    <!-- 頂部導航與連線狀態 -->
+    <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-10 flex justify-between items-center">
+        <h1 class="text-xl font-bold">🚗 藍牙控制面板</h1>
+        <button id="connectBtn" class="bg-white text-blue-600 px-4 py-1 rounded font-bold shadow active:bg-blue-100 transition">
+            連線藍牙
+        </button>
+    </header>
+
+    <div class="px-4 mt-2">
+        <p id="statusText" class="text-sm text-red-500 font-bold text-right mt-1">狀態: 未連線</p>
+    </div>
+
+    <!-- 動作控制區 -->
+    <section class="m-4 bg-white p-4 rounded-xl shadow-sm">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">🎮 單步動作控制</h2>
+        <div class="grid grid-cols-3 gap-3 text-center">
+            <div></div>
+            <button onclick="sendCmd('F')" class="bg-blue-500 text-white p-4 rounded-lg shadow active:bg-blue-700 text-xl font-bold">直走<br>F</button>
+            <div></div>
+            
+            <button onclick="sendCmd('L')" class="bg-blue-500 text-white p-4 rounded-lg shadow active:bg-blue-700 text-xl font-bold">左轉<br>L</button>
+            <button onclick="sendCmd('S')" class="bg-green-500 text-white p-4 rounded-lg shadow active:bg-green-700 text-xl font-bold">掃描<br>S</button>
+            <button onclick="sendCmd('R')" class="bg-blue-500 text-white p-4 rounded-lg shadow active:bg-blue-700 text-xl font-bold">右轉<br>R</button>
+            
+            <div></div>
+            <button onclick="sendCmd('U')" class="bg-purple-500 text-white p-4 rounded-lg shadow active:bg-purple-700 text-xl font-bold">迴轉<br>U</button>
+            <button onclick="sendCmd('C')" class="bg-red-500 text-white p-4 rounded-lg shadow active:bg-red-700 text-xl font-bold">清空<br>C</button>
+        </div>
+
+        <div class="mt-4 mt-4">
+            <h3 class="text-sm font-bold text-gray-600 mb-1">連續指令 (如 FFLRUS):</h3>
+            <div class="flex gap-2">
+                <input type="text" id="seqInput" class="border rounded px-3 py-2 flex-1 text-lg uppercase" placeholder="輸入指令...">
+                <button onclick="sendSeq()" class="bg-slate-700 text-white px-4 rounded font-bold">送出</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- RFID 顯示區 -->
+    <section class="m-4 bg-white p-4 rounded-xl shadow-sm border-l-4 border-green-500">
+        <h2 class="text-lg font-bold mb-2">📡 RFID 儀表板</h2>
+        <p class="text-gray-600 text-sm mb-1" id="rfidCount">總掃描次數: 0</p>
+        <p class="text-2xl font-bold text-blue-600 mb-3" id="rfidLatest">最新: (無)</p>
+        <div id="rfidList" class="bg-slate-50 border p-2 rounded h-32 overflow-y-auto log-box">
+            <!-- 歷史紀錄 -->
+        </div>
+    </section>
+
+    <!-- 參數調整區 -->
+    <section class="m-4 bg-white p-4 rounded-xl shadow-sm">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">⚙️ 參數調整</h2>
+        
+        <div class="grid grid-cols-2 gap-4">
+            <!-- PID 區 -->
+            <div>
+                <h3 class="font-bold text-sm text-gray-500 mb-2">PID 設定</h3>
+                <div class="flex items-center mb-2">
+                    <span class="w-8 font-bold">Kp:</span>
+                    <input type="number" id="inpP" value="24.0" class="border rounded px-2 py-1 w-16 mr-2">
+                    <button onclick="sendParam('P', 'inpP')" class="bg-gray-200 px-2 py-1 rounded text-sm shadow-sm active:bg-gray-300">設定</button>
+                </div>
+                <div class="flex items-center mb-2">
+                    <span class="w-8 font-bold">Ki:</span>
+                    <input type="number" id="inpI" value="0.0" class="border rounded px-2 py-1 w-16 mr-2">
+                    <button onclick="sendParam('I', 'inpI')" class="bg-gray-200 px-2 py-1 rounded text-sm shadow-sm active:bg-gray-300">設定</button>
+                </div>
+                <div class="flex items-center mb-2">
+                    <span class="w-8 font-bold">Kd:</span>
+                    <input type="number" id="inpD" value="140.0" class="border rounded px-2 py-1 w-16 mr-2">
+                    <button onclick="sendParam('D', 'inpD')" class="bg-gray-200 px-2 py-1 rounded text-sm shadow-sm active:bg-gray-300">設定</button>
+                </div>
+            </div>
+            
+            <!-- 轉彎延遲區 -->
+            <div>
+                <h3 class="font-bold text-sm text-gray-500 mb-2">轉彎延遲 (ms)</h3>
+                <div class="flex items-center mb-2">
+                    <span class="w-8 font-bold">左(X):</span>
+                    <input type="number" id="inpX" value="325" class="border rounded px-2 py-1 w-16 mr-2">
+                    <button onclick="sendParam('X', 'inpX')" class="bg-gray-200 px-2 py-1 rounded text-sm shadow-sm active:bg-gray-300">設定</button>
+                </div>
+                <div class="flex items-center mb-2">
+                    <span class="w-8 font-bold">右(Y):</span>
+                    <input type="number" id="inpY" value="425" class="border rounded px-2 py-1 w-16 mr-2">
+                    <button onclick="sendParam('Y', 'inpY')" class="bg-gray-200 px-2 py-1 rounded text-sm shadow-sm active:bg-gray-300">設定</button>
+                </div>
+                <div class="flex items-center mb-2">
+                    <span class="w-8 font-bold">迴(Z):</span>
+                    <input type="number" id="inpZ" value="605" class="border rounded px-2 py-1 w-16 mr-2">
+                    <button onclick="sendParam('Z', 'inpZ')" class="bg-gray-200 px-2 py-1 rounded text-sm shadow-sm active:bg-gray-300">設定</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 通訊日誌區 -->
+    <section class="m-4 bg-white p-4 rounded-xl shadow-sm">
+        <h2 class="text-lg font-bold mb-2">📜 通訊日誌</h2>
+        <div id="sysLog" class="bg-slate-800 text-green-400 p-2 rounded h-40 overflow-y-auto log-box break-all">
+            等待連線...<br>
+        </div>
+    </section>
+
+    <script>
+        // --- 藍牙變數設定 ---
+        // HM-10 預設 UUID
+        const SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
+        const CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+
+        let bluetoothDevice;
+        let gattCharacteristic;
+        let receiveBuffer = "";
+        
+        let rfidRecords = [];
+
+        const connectBtn = document.getElementById('connectBtn');
+        const statusText = document.getElementById('statusText');
+        const sysLog = document.getElementById('sysLog');
+        const rfidCountEl = document.getElementById('rfidCount');
+        const rfidLatestEl = document.getElementById('rfidLatest');
+        const rfidListEl = document.getElementById('rfidList');
+
+        // --- UI 輔助函式 ---
+        function logMsg(msg, type="SYS") {
+            const time = new Date().toLocaleTimeString();
+            let prefix = "⚙️ [SYS]";
+            let color = "text-gray-400";
+            if (type === "TX") { prefix = "📤 [TX]"; color = "text-blue-400"; }
+            else if (type === "RX") { prefix = "📥 [RX]"; color = "text-green-400"; }
+            else if (type === "ERR") { prefix = "❌ [ERR]"; color = "text-red-400"; }
+
+            sysLog.innerHTML += `<span class="${color}">${time} ${prefix} ${msg}</span><br>`;
+            sysLog.scrollTop = sysLog.scrollHeight;
+        }
+
+        // --- 藍牙核心功能 ---
+        connectBtn.addEventListener('click', async () => {
+            if (gattCharacteristic) {
+                disconnect();
+                return;
+            }
+
+            try {
+                logMsg("正在請求藍牙裝置...", "SYS");
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_UUID] }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                logMsg("連接 GATT 伺服器...", "SYS");
+                statusText.innerText = "狀態: 連線中...";
+                statusText.className = "text-sm font-bold text-yellow-500 text-right mt-1";
+
+                const server = await bluetoothDevice.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                gattCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+                // 啟動接收通知
+                await gattCharacteristic.startNotifications();
+                gattCharacteristic.addEventListener('characteristicvaluechanged', handleReceive);
+
+                logMsg("✅ 連線成功！", "SYS");
+                statusText.innerText = "狀態: 🟢 已連線";
+                statusText.className = "text-sm font-bold text-green-500 text-right mt-1";
+                connectBtn.innerText = "斷開連線";
+                connectBtn.className = "bg-red-500 text-white px-4 py-1 rounded font-bold shadow active:bg-red-600 transition";
+
+            } catch (error) {
+                logMsg("連線失敗: " + error, "ERR");
+                statusText.innerText = "狀態: 未連線";
+                statusText.className = "text-sm font-bold text-red-500 text-right mt-1";
+            }
+        });
+
+        function disconnect() {
+            if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+                bluetoothDevice.gatt.disconnect();
+            }
+        }
+
+        function onDisconnected() {
+            logMsg("⚠️ 藍牙已斷開", "SYS");
+            gattCharacteristic = null;
+            statusText.innerText = "狀態: 未連線";
+            statusText.className = "text-sm font-bold text-red-500 text-right mt-1";
+            connectBtn.innerText = "連線藍牙";
+            connectBtn.className = "bg-white text-blue-600 px-4 py-1 rounded font-bold shadow active:bg-blue-100 transition";
+        }
+
+        // 發送指令
+        async function sendData(dataStr) {
+            if (!gattCharacteristic) {
+                alert("請先連線藍牙！");
+                return;
+            }
+            try {
+                const encoder = new TextEncoder();
+                // HM-10 預設一次最多發送 20 bytes，若超長需分段發送，但我們的指令都很短
+                await gattCharacteristic.writeValue(encoder.encode(dataStr));
+                logMsg(dataStr, "TX");
+            } catch (error) {
+                logMsg("發送失敗: " + error, "ERR");
+            }
+        }
+
+        // 接收藍牙資料處理
+        function handleReceive(event) {
+            const decoder = new TextDecoder('utf-8');
+            const value = decoder.decode(event.target.value);
+            receiveBuffer += value;
+
+            // 如果有換行符號，代表一句話結束
+            let lines = receiveBuffer.split(/\r?\n/);
+            // 保留最後一個可能還沒收完的片段
+            receiveBuffer = lines.pop();
+
+            for (let line of lines) {
+                if (line.trim() !== "") {
+                    processIncomingMessage(line.trim());
+                }
+            }
+        }
+
+        // 解析收到的每一行訊息
+        function processIncomingMessage(msg) {
+            if (msg.startsWith("UID:")) {
+                const uid = msg.split(":")[1];
+                updateRFID(uid);
+                logMsg(`掃描到卡片: ${uid}`, "SYS");
+            } else {
+                logMsg(msg, "RX");
+            }
+        }
+
+        // --- 功能按鍵事件 ---
+        function sendCmd(cmd) {
+            sendData(cmd);
+            if (cmd === 'C') {
+                clearRFID();
+            }
+        }
+
+        function sendSeq() {
+            let seq = document.getElementById('seqInput').value.trim().toUpperCase();
+            if (!seq) return;
+            
+            // 驗證字元
+            const valid = /^[LRUFSC]+$/.test(seq);
+            if (!valid) {
+                alert("指令只能包含 L, R, U, F, S, C！");
+                return;
+            }
+            sendData(seq);
+            document.getElementById('seqInput').value = "";
+            if (seq.includes('C')) clearRFID();
+        }
+
+        function sendParam(param, inputId) {
+            const val = document.getElementById(inputId).value;
+            if (val === "") return;
+            sendData(param + val);
+        }
+
+        // --- RFID 儀表板更新 ---
+        function updateRFID(uid) {
+            rfidRecords.push(uid);
+            rfidCountEl.innerText = `總掃描次數: ${rfidRecords.length}`;
+            rfidLatestEl.innerText = `最新: ${uid}`;
+            
+            // 新增列表項目
+            rfidListEl.innerHTML += `<div class="border-b border-slate-200 py-1">#${rfidRecords.length} - UID: ${uid}</div>`;
+            rfidListEl.scrollTop = rfidListEl.scrollHeight; // 滾動到底部
+        }
+
+        function clearRFID() {
+            rfidRecords = [];
+            rfidCountEl.innerText = `總掃描次數: 0`;
+            rfidLatestEl.innerText = `最新: (無)`;
+            rfidListEl.innerHTML = "";
+        }
+    </script>
+</body>
+</html>
