@@ -548,8 +548,22 @@
                 statusText.innerText = "連線伺服器中...";
                 statusDot.className = "w-2 h-2 rounded-full bg-yellow-500 animate-pulse";
                 
-                sbSocket = io(url + '/team', {
-                    path: '/scoreboard.io',
+                // 解析 URL 以確保 namespace 和 path 正確 (解決連線卡住的問題)
+                let serverOrigin = url;
+                let ioPath = '/scoreboard.io';
+                try {
+                    const parsedUrl = new URL(url);
+                    serverOrigin = parsedUrl.origin; // 例如 http://carcar.ntuee.org
+                    let pathname = parsedUrl.pathname; // 例如 /scoreboard
+                    if (pathname === '/') pathname = '';
+                    ioPath = pathname + '/scoreboard.io';
+                } catch(e) {
+                    console.warn("URL解析發生異常，嘗試使用預設規則", e);
+                }
+
+                // 建立 Socket.IO 連線
+                sbSocket = io(serverOrigin + '/team', {
+                    path: ioPath,
                     transports: ['websocket', 'polling']
                 });
 
@@ -557,7 +571,6 @@
                     sbSid = sbSocket.id;
                     logMsg(`計分板連線成功! sid: ${sbSid}`, "SYS");
                     
-                    // Python用的是 socket.call，Web 通常用 emit 帶 callback
                     sbSocket.emit("start_game", { teamname: team }, (res) => {
                         logMsg(`Game Started: ${JSON.stringify(res)}`, "SYS");
                     });
@@ -566,6 +579,13 @@
                     statusText.innerText = "伺服器已連線";
                     statusDot.className = "w-2 h-2 rounded-full bg-green-500";
                     updateOfficialScore(url);
+                });
+
+                sbSocket.on('connect_error', (err) => {
+                    logMsg(`計分板連線錯誤: ${err.message}`, "ERR");
+                    isScoreboardActive = false;
+                    statusText.innerText = "連線失敗 (詳閱日誌)";
+                    statusDot.className = "w-2 h-2 rounded-full bg-red-500";
                 });
 
                 sbSocket.on('disconnect', () => {
