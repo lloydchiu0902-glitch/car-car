@@ -1,862 +1,968 @@
-<!DOCTYPE html>
-<html lang="zh-TW" class="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🚗 藍牙循跡車 APP</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 引入 Lucide Icons 以符合 Windows 11 簡約圖示風格 -->
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        win: {
-                            bg: '#202020',
-                            card: '#2d2d2d',
-                            hover: '#3f3f3f',
-                            border: 'rgba(255,255,255,0.08)',
-                            input: '#1e1e1e',
-                            primary: '#4cc2ff',
-                            primaryHover: '#47b1e8'
-                        }
-                    },
-                    fontFamily: {
-                        sans: ['Segoe UI Variable', 'Segoe UI', 'Microsoft JhengHei', 'system-ui', 'sans-serif'],
-                    }
-                }
-            }
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, filedialog
+import threading
+import time
+import sys
+import json
+import os
+import csv
+from collections import deque
+import abc
+import re
+from typing import Optional, Tuple, cast
+
+print("程式開始執行，正在嘗試載入模組...")
+
+# 嘗試載入藍牙模組
+HAS_HM10 = False
+IMPORT_ERROR_MSG = ""
+try:
+    from hm10_esp32 import HM10ESP32Bridge
+    HAS_HM10 = True
+    print("hm10_esp32 模組載入成功！")
+except Exception as e:
+    HAS_HM10 = False
+    IMPORT_ERROR_MSG = str(e)
+    print(f"hm10_esp32 模組載入失敗: {IMPORT_ERROR_MSG}")
+
+# 嘗試載入 SocketIO 模組
+try:
+    import requests
+    import socketio
+    HAS_SOCKETIO = True
+    print("socketio 模組載入成功！")
+except ImportError:
+    HAS_SOCKETIO = False
+    print("缺少 requests 或 python-socketio 套件，計分板伺服器連線將停用。")
+
+
+# ==========================================
+# 計分板類別 (Scoreboard) 整合
+# ==========================================
+class Scoreboard(abc.ABC):
+    def __init__(self, gui_log=None):
+        self.gui_log = gui_log
+
+    def log_info(self, msg):
+        if self.gui_log: self.gui_log(str(msg), "SYS")
+        else: print(f"[INFO] {msg}")
+
+    def log_debug(self, msg):
+        if self.gui_log: self.gui_log(str(msg), "SYS")
+        else: print(f"[DEBUG] {msg}")
+
+    def log_error(self, msg):
+        if self.gui_log: self.gui_log(str(msg), "ERR")
+        else: print(f"[ERROR] {msg}")
+
+    @abc.abstractmethod
+    def add_UID(self, UID_str: str) -> Tuple[int, float]:
+        pass
+
+    @abc.abstractmethod
+    def get_current_score(self) -> Optional[int]:
+        pass
+
+class ScoreboardFake(Scoreboard):
+    def __init__(self, teamname, filepath, gui_log=None):
+        super().__init__(gui_log)
+        self.total_score = 0
+        self.team = teamname
+        self.log_info("Using fake scoreboard!")
+        self.log_info(f"{self.team} is playing game!")
+        self._read_UID_file(filepath)
+        self.visit_list = set()
+
+    def _read_UID_file(self, filepath: str):
+        self.uid_to_score = {}
+        try:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+                for row in rows[1:]:
+                    if len(row) >= 2:
+                        uid, score = row[0].strip(), row[1].strip()
+                        self.uid_to_score[uid] = int(score)
+            self.log_info("Successfully read the UID file!")
+        except Exception as e:
+            self.log_error(f"讀取 Fake UID 檔案失敗: {e}")
+
+    def add_UID(self, UID_str: str) -> Tuple[int, float]:
+        self.log_debug(f"Adding UID: {UID_str}")
+        if not isinstance(UID_str, str):
+            raise ValueError(f"UID format error! (expected: str) (got: {UID_str})")
+        if not re.match(r"^[0-9A-Fa-f]{8}$", UID_str):
+            raise ValueError(f"UID format error! (expected: 8 hex digits) (got: {UID_str})")
+
+        if UID_str not in self.uid_to_score:
+            self.log_info(f"This UID is not in the list: {UID_str}")
+            return 0, 0
+        elif UID_str in self.visit_list:
+            self.log_info(f"This UID has been visited: {UID_str}")
+            return 0, 0
+        else:
+            point = self.uid_to_score[UID_str]
+            self.total_score += point
+            self.log_info(f"A treasure is found! You got {point} points.")
+            self.visit_list.add(UID_str)
+            return point, 0
+
+    def get_current_score(self):
+        return int(self.total_score)
+
+if HAS_SOCKETIO:
+    class TeamNamespace(socketio.ClientNamespace):
+        def __init__(self, namespace, gui_log=None):
+            super().__init__(namespace)
+            self.gui_log = gui_log
+
+        def log_info(self, msg):
+            if self.gui_log: self.gui_log(str(msg), "SYS")
+            else: print(msg)
+
+        def on_connect(self):
+            client = cast(socketio.Client, self.client)
+            self.log_info(f"Connected with sid {client.get_sid(namespace='/team')}")
+
+        def on_UID_added(self, message):
+            self.log_info(message)
+
+        def on_disconnect(self):
+            self.log_info("Disconnected from server")
+
+    class ScoreboardServer(Scoreboard):
+        def __init__(self, teamname: str, host=f"http://localhost:3000", debug=False, gui_log=None):
+            super().__init__(gui_log)
+            self.teamname = teamname
+            self.ip = host
+            self.log_info(f"{self.teamname} wants to play!")
+            self.log_info(f"connecting to server......{self.ip}")
+
+            self.socket = socketio.Client(logger=debug, engineio_logger=debug)
+            self.socket.register_namespace(TeamNamespace("/team", gui_log=self.gui_log))
+            self.socket.connect(self.ip, socketio_path="scoreboard.io")
+            self.sid = self.socket.get_sid(namespace="/team")
+
+            self.log_info("Game is starting.....")
+            self._start_game(self.teamname)
+
+        def _start_game(self, teamname: str):
+            payload = {"teamname": teamname}
+            res = self.socket.call("start_game", payload, namespace="/team")
+            self.log_info(res)
+
+        def add_UID(self, UID_str: str) -> Tuple[int, float]:
+            self.log_debug(f"Adding UID: {UID_str}")
+            if not isinstance(UID_str, str):
+                raise ValueError(f"UID format error! (expected: str) (got: {UID_str})")
+            if not re.match(r"^[0-9A-Fa-f]{8}$", UID_str):
+                raise ValueError(f"UID format error! (expected: 8 hex digits) (got: {UID_str})")
+
+            res = self.socket.call("add_UID", UID_str, namespace="/team")
+            if not res:
+                self.log_error("Failed to add UID")
+                return 0, 0
+            res = cast(dict, res)
+            message = res.get("message", "No message")
+            score = res.get("score", 0)
+            time_remaining = res.get("time_remaining", 0)
+            self.log_info(message)
+            return score, time_remaining
+
+        def get_current_score(self) -> Optional[int]:
+            try:
+                res = requests.get(self.ip + "/current_score", params={"sid": self.sid})
+                return res.json()["current_score"]
+            except Exception as e:
+                self.log_error(f"Failed to fetch current score: {e}")
+                return None
+else:
+    # 建立一個不具作用的 Dummy 以免出錯
+    class ScoreboardServer(Scoreboard):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.log_error("未安裝 python-socketio，無法連線伺服器！")
+        def add_UID(self, UID_str: str) -> Tuple[int, float]: return 0, 0
+        def get_current_score(self) -> Optional[int]: return None
+
+# ==========================================
+# 內建 DFS 路徑演算法類別
+# ==========================================
+class MazeSolver:
+    def __init__(self):
+        self.rows = []
+        self.num_nodes = 0
+        self.num_prizes = 0
+        self.all_prizes_mask = 0
+        self.adj = {}
+        self.prize_val = {}
+        self.prize_bit = {}
+        self.id_to_coord = {}
+        self.memo = {}
+        self.best_next = {}
+
+    def load_csv_data(self, filepath):
+        self.rows = []
+        with open(filepath, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("index", "").strip():
+                    self.rows.append(row)
+        return len(self.rows)
+
+    def build_graph(self, start_node, prize_nodes):
+        self.num_nodes = 0
+        self.num_prizes = 0
+        self.all_prizes_mask = 0
+        self.adj = {}
+        self.prize_val = {}
+        self.prize_bit = {}
+        self.id_to_coord = {}
+        self.memo = {}
+        self.best_next = {}
+
+        node_ids = [int(r["index"]) for r in self.rows]
+        self.num_nodes = len(node_ids)
+
+        for u in node_ids:
+            self.adj[u] = []
+
+        directions = ["North", "South", "West", "East"]
+        for row in self.rows:
+            u = int(row["index"])
+            for d in directions:
+                val = row[d].strip()
+                if val != "":
+                    self.adj[u].append(int(float(val)))
+
+        row_map = {int(r["index"]): r for r in self.rows}
+        self.id_to_coord[start_node] = (0, 0)
+        q = deque([start_node])
+
+        mapping = {
+            "North": (-1, 0), "South": (1, 0),
+            "West": (0, -1), "East": (0, 1),
         }
-    </script>
-    <style>
-        body { background-color: #202020; color: #ffffff; }
-        button { touch-action: manipulation; }
-        .log-box { font-family: 'Consolas', monospace; font-size: 0.85rem; }
-        input[type="file"] { display: none; }
+
+        while q:
+            u = q.popleft()
+            r, c = self.id_to_coord[u]
+            row = row_map[u]
+            for d, (dr, dc) in mapping.items():
+                val = row[d].strip()
+                if val == "": continue
+                v = int(float(val))
+                if v not in self.id_to_coord:
+                    self.id_to_coord[v] = (r + dr, c + dc)
+                    q.append(v)
+
+        for u in node_ids:
+            self.prize_val[u] = 0
+            self.prize_bit[u] = -1
+
+        sr, sc = self.id_to_coord[start_node]
+        for node in prize_nodes:
+            if node in self.id_to_coord:
+                r, c = self.id_to_coord[node]
+                dist = abs(r - sr) + abs(c - sc)
+                self.prize_val[node] = dist * 10
+                self.prize_bit[node] = self.num_prizes
+                self.num_prizes += 1
+
+        self.all_prizes_mask = (1 << self.num_prizes) - 1
+
+    def dfs(self, u, k, state):
+        if k == 0 or state == self.all_prizes_mask:
+            return 0
+        if (u, k, state) in self.memo:
+            return self.memo[(u, k, state)]
+
+        max_future_score = 0
+        best_v = -1
+
+        for next_node in self.adj[u]:
+            next_state = state
+            gained_score = 0
+            bit = self.prize_bit[next_node]
+
+            if bit != -1 and not (state & (1 << bit)):
+                next_state |= (1 << bit)
+                gained_score = self.prize_val[next_node]
+
+            future_score = self.dfs(next_node, k - 1, next_state)
+
+            if gained_score + future_score >= max_future_score:
+                max_future_score = gained_score + future_score
+                best_v = next_node
+
+        self.best_next[(u, k, state)] = best_v
+        self.memo[(u, k, state)] = max_future_score
+        return max_future_score
+
+    def calculate(self, start_node, initial_dir, total_steps, prize_nodes):
+        self.build_graph(start_node, prize_nodes)
+        max_score = self.dfs(start_node, total_steps, 0)
+
+        curr, k, state = start_node, total_steps, 0
+        path = [curr]
+
+        while k > 0:
+            if state == self.all_prizes_mask or (curr, k, state) not in self.best_next:
+                break
+            nxt = self.best_next[(curr, k, state)]
+            if nxt == -1: break
+
+            path.append(nxt)
+            bit = self.prize_bit[nxt]
+            if bit != -1 and not (state & (1 << bit)):
+                state |= (1 << bit)
+            curr = nxt
+            k -= 1
+
+        commands = ""
+        current_dir = initial_dir
+        sim_state = 0
+
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            r1, c1 = self.id_to_coord[u]
+            r2, c2 = self.id_to_coord[v]
+
+            target_dir = -1
+            if r2 < r1: target_dir = 0
+            elif c2 > c1: target_dir = 1
+            elif r2 > r1: target_dir = 2
+            elif c2 < c1: target_dir = 3
+
+            turn = (target_dir - current_dir + 4) % 4
+            if turn == 0: commands += "F"
+            elif turn == 1: commands += "R"
+            elif turn == 2: commands += "U"
+            elif turn == 3: commands += "L"
+
+            bit = self.prize_bit[v]
+            if bit != -1 and not (sim_state & (1 << bit)):
+                sim_state |= (1 << bit)
+
+            current_dir = target_dir
+
+        return max_score, path, commands
+
+
+# ==========================================
+# 主程式 GUI
+# ==========================================
+class CarControllerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("🚗 藍牙循跡車控制面板 (Win11 風格)")
+        self.root.geometry("850x650")
+        self.root.minsize(800, 600)
         
-        /* 自訂捲軸樣式 (Win11風格) */
-        ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #777; }
-
-        /* 設定列的通用樣式 */
-        .setting-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 16px;
-            background-color: #2d2d2d;
-            border: 1px solid rgba(255,255,255,0.06);
-            transition: background-color 0.2s;
-        }
-        .setting-row:not(:last-child) {
-            border-bottom: none;
-        }
-        .setting-row:first-child { border-top-left-radius: 8px; border-top-right-radius: 8px; }
-        .setting-row:last-child { border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
-        .setting-row:hover { background-color: #333333; }
+        self.bridge = None
+        self.is_connected = False
+        self.scoreboard = None
+        self.config_file = "car_config.json"
+        self.rfid_records = []
+        self.maze_solver = MazeSolver()
         
-        .btn-secondary {
-            background-color: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
-            color: #fff;
-            padding: 6px 16px;
-            border-radius: 6px;
-            font-size: 0.875rem;
-            transition: all 0.2s;
+        self.config = {
+            "PORT": "COM10",
+            "P": "24.0", "I": "0.0", "D": "140.0",
+            "X": "325", "Y": "425", "Z": "605",
+            "SB_MODE": "1", # 0: Server, 1: Fake
+            "SB_TEAM": "YOUR_TEAM_NAME",
+            "SB_URL": "http://carcar.ntuee.org/scoreboard",
+            "SB_FILE": "data/fakeUID.csv"
         }
-        .btn-secondary:hover { background-color: rgba(255,255,255,0.1); }
-        .btn-secondary:active { background-color: rgba(255,255,255,0.04); color: rgba(255,255,255,0.7); }
-
-        .btn-primary {
-            background-color: #4cc2ff;
-            color: #000;
-            border: 1px solid transparent;
-            padding: 6px 16px;
-            border-radius: 6px;
-            font-size: 0.875rem;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        .btn-primary:hover { background-color: #47b1e8; }
+        self.load_config()
+        self.apply_dark_theme()
+        self.create_widgets()
         
-        .win-input {
-            background-color: #1e1e1e;
-            border: 1px solid rgba(255,255,255,0.1);
-            color: white;
-            border-radius: 6px;
-            padding: 6px 12px;
-            font-size: 0.875rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        .win-input:focus { border-color: #4cc2ff; border-bottom-width: 2px; padding-bottom: 5px;}
-    </style>
-</head>
-<body class="flex h-screen overflow-hidden antialiased">
-
-    <!-- 側邊欄 (MD以上顯示) -->
-    <aside class="w-72 flex-shrink-0 flex-col hidden md:flex border-r border-win-border p-4 overflow-y-auto">
-        <!-- 帳號區塊 -->
-        <div class="flex items-center gap-3 mb-8 px-2 hover:bg-win-hover p-2 rounded-lg cursor-pointer transition-colors">
-            <div class="w-12 h-12 rounded-full bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center text-xl font-bold">🚗</div>
-            <div>
-                <div class="font-semibold text-lg">循跡車系統</div>
-                <div class="text-xs text-gray-400">本地連線控制</div>
-            </div>
-        </div>
-
-        <!-- 搜尋框 -->
-        <div class="relative mb-6">
-            <input type="text" placeholder="Find a setting" class="w-full win-input pl-9 rounded-full bg-win-card border-none">
-            <i data-lucide="search" class="absolute left-3 top-1.5 w-4 h-4 text-gray-400"></i>
-        </div>
-
-        <!-- 導覽列 -->
-        <nav class="space-y-1">
-            <a href="#section-status" class="flex items-center gap-4 px-3 py-2.5 rounded-lg bg-win-hover/50 relative">
-                <div class="absolute left-0 top-2 bottom-2 w-1 bg-win-primary rounded-full"></div>
-                <i data-lucide="bluetooth" class="w-5 h-5 text-win-primary"></i>
-                <span class="text-sm font-medium">連線狀態 (System)</span>
-            </a>
-            <a href="#section-map" class="flex items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-win-hover transition-colors text-gray-300 hover:text-white">
-                <i data-lucide="map" class="w-5 h-5"></i>
-                <span class="text-sm">路徑規劃 (Map & Path)</span>
-            </a>
-            <a href="#section-control" class="flex items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-win-hover transition-colors text-gray-300 hover:text-white">
-                <i data-lucide="gamepad-2" class="w-5 h-5"></i>
-                <span class="text-sm">動作控制 (Control)</span>
-            </a>
-            <a href="#section-rfid" class="flex items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-win-hover transition-colors text-gray-300 hover:text-white">
-                <i data-lucide="radio" class="w-5 h-5"></i>
-                <span class="text-sm">RFID 儀表板</span>
-            </a>
-            <a href="#section-params" class="flex items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-win-hover transition-colors text-gray-300 hover:text-white">
-                <i data-lucide="settings-2" class="w-5 h-5"></i>
-                <span class="text-sm">參數調整 (Parameters)</span>
-            </a>
-            <a href="#section-log" class="flex items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-win-hover transition-colors text-gray-300 hover:text-white">
-                <i data-lucide="terminal-square" class="w-5 h-5"></i>
-                <span class="text-sm">通訊日誌 (Logs)</span>
-            </a>
-        </nav>
-    </aside>
-
-    <!-- 主要內容區 -->
-    <main class="flex-1 overflow-y-auto pb-20 relative scroll-smooth">
-        <div class="max-w-4xl mx-auto p-4 md:p-8 pt-8">
+        if not HAS_HM10:
+            self.root.after(500, self.show_startup_error)
+        else:
+            self.log("系統初始化完成，等待連線...", "SYS")
             
-            <!-- 標題 -->
-            <h1 class="text-3xl font-semibold mb-8 flex items-center gap-3">
-                <span class="md:hidden w-8 h-8 rounded-full bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center text-sm font-bold">🚗</span>
-                System
-            </h1>
-
-            <!-- Hero Section: 連線狀態 -->
-            <div id="section-status" class="bg-win-card rounded-xl p-6 mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4 border border-win-border shadow-lg">
-                <div class="flex items-center gap-4">
-                    <div class="w-24 h-16 bg-win-input rounded-lg flex items-center justify-center border border-white/10 shadow-inner">
-                        <i data-lucide="car" class="w-8 h-8 text-gray-400" id="carIcon"></i>
-                    </div>
-                    <div>
-                        <h2 class="text-xl font-semibold">藍牙循跡車 (HM-10)</h2>
-                        <div class="flex items-center gap-2 mt-1">
-                            <span class="w-2 h-2 rounded-full bg-red-500" id="statusDot"></span>
-                            <span id="statusText" class="text-sm text-gray-400">未連線</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="flex items-center gap-4">
-                    <div class="text-right hidden sm:block">
-                        <div class="text-sm font-medium">連線埠</div>
-                        <input type="text" id="portInput" value="COM10" class="win-input w-24 text-center mt-1 text-xs py-1" disabled placeholder="由瀏覽器自動配對">
-                    </div>
-                    <button id="connectBtn" class="btn-primary px-6 py-2 shadow-lg">連線藍牙</button>
-                </div>
-            </div>
-
-            <!-- 區塊: 路徑規劃 -->
-            <div id="section-map" class="mb-8">
-                <h3 class="text-lg font-medium mb-3 pl-1 text-gray-200">路徑規劃 (Map & Algorithm)</h3>
-                
-                <div class="setting-row">
-                    <div class="flex items-center gap-4">
-                        <i data-lucide="file-spreadsheet" class="w-5 h-5 text-gray-400"></i>
-                        <div>
-                            <div class="font-medium text-sm">地圖資料 (CSV)</div>
-                            <div id="csvStatus" class="text-xs text-gray-400 mt-0.5">尚未匯入，請選擇 maze.csv</div>
-                        </div>
-                    </div>
-                    <label class="btn-secondary cursor-pointer flex items-center gap-2">
-                        匯入檔案
-                        <input type="file" id="csvFileInput" accept=".csv">
-                    </label>
-                </div>
-
-                <div class="setting-row">
-                    <div class="flex items-center gap-4">
-                        <i data-lucide="navigation" class="w-5 h-5 text-gray-400"></i>
-                        <div>
-                            <div class="font-medium text-sm">起點與方向</div>
-                            <div class="text-xs text-gray-400 mt-0.5">設定出發點 Node 與車頭朝向</div>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <input type="number" id="startNode" value="1" class="win-input w-16 text-center" placeholder="Node">
-                        <select id="initialDir" class="win-input w-24 cursor-pointer">
-                            <option value="0">北 (0)</option>
-                            <option value="1">東 (1)</option>
-                            <option value="2">南 (2)</option>
-                            <option value="3" selected>西 (3)</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="setting-row flex-col sm:flex-row items-start sm:items-center gap-4">
-                    <div class="flex items-center gap-4">
-                        <i data-lucide="gift" class="w-5 h-5 text-gray-400"></i>
-                        <div>
-                            <div class="font-medium text-sm">獎品與步數</div>
-                            <div class="text-xs text-gray-400 mt-0.5">請用逗號隔開獎品 Node，並設定總步數</div>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2 w-full sm:w-auto">
-                        <input type="text" id="prizeNodes" value="1,6,12,13,16,22,34,43,46,47" class="win-input flex-1 sm:w-48 text-xs" placeholder="1,2,3...">
-                        <input type="number" id="totalSteps" value="80" class="win-input w-16 text-center text-xs" title="總步數">
-                    </div>
-                </div>
-
-                <div class="setting-row">
-                    <div class="flex items-center gap-4">
-                        <i data-lucide="cpu" class="w-5 h-5 text-win-primary"></i>
-                        <div>
-                            <div class="font-medium text-sm">運算最佳路徑</div>
-                            <div class="text-xs text-gray-400 mt-0.5">執行 DFS 演算法並產出控制指令</div>
-                        </div>
-                    </div>
-                    <button onclick="calculateAutoPath()" class="btn-secondary hover:bg-win-primary hover:text-black hover:border-transparent">開始計算</button>
-                </div>
-
-                <!-- 運算結果框 -->
-                <div id="pathResult" class="hidden mt-2 p-4 bg-win-input border border-win-border rounded-lg text-sm">
-                    <div class="flex items-center justify-between mb-2">
-                        <span class="text-gray-400">最高分預測</span>
-                        <span id="scoreOut" class="text-win-primary font-bold text-lg">0</span>
-                    </div>
-                    <div class="mb-2">
-                        <span class="text-gray-400 block mb-1">預計路徑:</span>
-                        <div id="pathOut" class="text-gray-300 text-xs break-all"></div>
-                    </div>
-                    <div>
-                        <span class="text-gray-400 block mb-1">產出指令 (自動填入下方):</span>
-                        <div id="cmdOut" class="font-mono text-win-primary bg-black/30 p-2 rounded break-all text-xs"></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 區塊: 動作控制 -->
-            <div id="section-control" class="mb-8">
-                <h3 class="text-lg font-medium mb-3 pl-1 text-gray-200">動作控制 (Manual Control)</h3>
-                
-                <div class="setting-row">
-                    <div class="flex flex-col w-full gap-3">
-                        <div class="flex items-center gap-4">
-                            <i data-lucide="keyboard" class="w-5 h-5 text-gray-400"></i>
-                            <div class="font-medium text-sm">連續指令輸入 (序列)</div>
-                        </div>
-                        <div class="flex gap-2 pl-9">
-                            <input type="text" id="seqInput" class="win-input flex-1 uppercase font-mono tracking-widest text-win-primary" placeholder="例如: FFLRU...">
-                            <button onclick="sendSeq()" class="btn-secondary px-6">發送</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="setting-row justify-center py-6">
-                    <div class="grid grid-cols-3 gap-3">
-                        <div></div>
-                        <button onclick="sendCmd('F')" class="bg-white/5 hover:bg-white/10 active:bg-white/20 border border-white/10 rounded-xl w-16 h-16 flex flex-col items-center justify-center transition-all shadow-sm group">
-                            <i data-lucide="arrow-up" class="w-5 h-5 text-gray-300 group-hover:text-win-primary mb-1"></i>
-                            <span class="text-[10px] text-gray-400">F</span>
-                        </button>
-                        <div></div>
-                        
-                        <button onclick="sendCmd('L')" class="bg-white/5 hover:bg-white/10 active:bg-white/20 border border-white/10 rounded-xl w-16 h-16 flex flex-col items-center justify-center transition-all shadow-sm group">
-                            <i data-lucide="arrow-left" class="w-5 h-5 text-gray-300 group-hover:text-win-primary mb-1"></i>
-                            <span class="text-[10px] text-gray-400">L</span>
-                        </button>
-                        <button onclick="sendCmd('U')" class="bg-white/5 hover:bg-white/10 active:bg-white/20 border border-white/10 rounded-xl w-16 h-16 flex flex-col items-center justify-center transition-all shadow-sm group">
-                            <i data-lucide="rotate-ccw" class="w-5 h-5 text-gray-300 group-hover:text-purple-400 mb-1"></i>
-                            <span class="text-[10px] text-gray-400">U</span>
-                        </button>
-                        <button onclick="sendCmd('R')" class="bg-white/5 hover:bg-white/10 active:bg-white/20 border border-white/10 rounded-xl w-16 h-16 flex flex-col items-center justify-center transition-all shadow-sm group">
-                            <i data-lucide="arrow-right" class="w-5 h-5 text-gray-300 group-hover:text-win-primary mb-1"></i>
-                            <span class="text-[10px] text-gray-400">R</span>
-                        </button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 區塊: RFID -->
-            <div id="section-rfid" class="mb-8">
-                <h3 class="text-lg font-medium mb-3 pl-1 text-gray-200">感測器狀態 (RFID)</h3>
-
-                <div class="setting-row">
-                    <div class="flex items-center gap-4">
-                        <i data-lucide="nfc" class="w-5 h-5 text-gray-400"></i>
-                        <div>
-                            <div class="font-medium text-sm">最新卡片</div>
-                            <div id="rfidLatest" class="text-sm text-green-400 mt-0.5 font-mono">(無)</div>
-                        </div>
-                    </div>
-                    <div class="text-right">
-                        <div class="text-xs text-gray-400">總次數</div>
-                        <div id="rfidCount" class="font-bold text-lg">0</div>
-                    </div>
-                </div>
-
-                <div class="setting-row flex-col items-stretch p-0 overflow-hidden">
-                    <div class="flex justify-between items-center p-3 border-b border-win-border bg-win-hover/30">
-                        <span class="text-xs text-gray-400">歷史紀錄</span>
-                        <button onclick="clearRFID()" class="text-xs text-red-400 hover:text-red-300 flex items-center gap-1"><i data-lucide="trash-2" class="w-3 h-3"></i> 清空</button>
-                    </div>
-                    <div id="rfidList" class="h-32 overflow-y-auto p-3 text-xs font-mono text-gray-300 space-y-1 bg-black/20">
-                        <!-- 紀錄 -->
-                    </div>
-                </div>
-            </div>
-
-            <!-- 區塊: 參數調整 -->
-            <div id="section-params" class="mb-8">
-                <h3 class="text-lg font-medium mb-3 pl-1 text-gray-200">參數調整 (Parameters)</h3>
-                
-                <!-- PID -->
-                <div class="mb-4">
-                    <div class="text-xs text-gray-400 pl-1 mb-1">PID 控制設定</div>
-                    <div class="setting-row">
-                        <div class="flex items-center gap-4 w-1/2">
-                            <span class="font-bold text-gray-300 w-6">Kp</span>
-                            <input type="number" id="inpP" value="24.0" class="win-input w-full">
-                        </div>
-                        <button onclick="sendParam('P', 'inpP')" class="btn-secondary">套用</button>
-                    </div>
-                    <div class="setting-row">
-                        <div class="flex items-center gap-4 w-1/2">
-                            <span class="font-bold text-gray-300 w-6">Ki</span>
-                            <input type="number" id="inpI" value="0.0" class="win-input w-full">
-                        </div>
-                        <button onclick="sendParam('I', 'inpI')" class="btn-secondary">套用</button>
-                    </div>
-                    <div class="setting-row">
-                        <div class="flex items-center gap-4 w-1/2">
-                            <span class="font-bold text-gray-300 w-6">Kd</span>
-                            <input type="number" id="inpD" value="140.0" class="win-input w-full">
-                        </div>
-                        <button onclick="sendParam('D', 'inpD')" class="btn-secondary">套用</button>
-                    </div>
-                </div>
-
-                <!-- 轉彎延遲 -->
-                <div class="mb-6">
-                    <div class="text-xs text-gray-400 pl-1 mb-1">轉彎延遲 (ms)</div>
-                    <div class="setting-row">
-                        <div class="flex items-center gap-4 w-1/2">
-                            <span class="font-bold text-gray-300 w-6">左(X)</span>
-                            <input type="number" id="inpX" value="325" class="win-input w-full">
-                        </div>
-                        <button onclick="sendParam('X', 'inpX')" class="btn-secondary">套用</button>
-                    </div>
-                    <div class="setting-row">
-                        <div class="flex items-center gap-4 w-1/2">
-                            <span class="font-bold text-gray-300 w-6">右(Y)</span>
-                            <input type="number" id="inpY" value="425" class="win-input w-full">
-                        </div>
-                        <button onclick="sendParam('Y', 'inpY')" class="btn-secondary">套用</button>
-                    </div>
-                    <div class="setting-row">
-                        <div class="flex items-center gap-4 w-1/2">
-                            <span class="font-bold text-gray-300 w-6">迴(Z)</span>
-                            <input type="number" id="inpZ" value="605" class="win-input w-full">
-                        </div>
-                        <button onclick="sendParam('Z', 'inpZ')" class="btn-secondary">套用</button>
-                    </div>
-                </div>
-
-                <!-- 參數調整歷史紀錄 -->
-                <div class="setting-row flex-col items-stretch p-0 overflow-hidden">
-                    <div class="flex justify-between items-center p-3 border-b border-win-border bg-win-hover/30">
-                        <span class="text-xs text-gray-400">參數調整紀錄</span>
-                        <button onclick="clearParamLog()" class="text-xs text-gray-400 hover:text-white flex items-center gap-1"><i data-lucide="eraser" class="w-3 h-3"></i> 清除</button>
-                    </div>
-                    <div id="paramLog" class="h-32 overflow-y-auto p-3 text-xs font-mono text-gray-300 space-y-1 bg-black/20">
-                        <span class="text-gray-500" id="paramEmptyText">暫無紀錄...</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 區塊: 通訊日誌 -->
-            <div id="section-log" class="mb-12">
-                <h3 class="text-lg font-medium mb-3 pl-1 text-gray-200">通訊日誌 (Logs)</h3>
-                <div class="setting-row flex-col items-stretch p-0 overflow-hidden">
-                    <div class="flex justify-between items-center p-3 border-b border-win-border bg-win-hover/30">
-                        <span class="text-xs text-gray-400">Terminal</span>
-                        <button onclick="document.getElementById('sysLog').innerHTML=''" class="text-xs text-gray-400 hover:text-white flex items-center gap-1"><i data-lucide="eraser" class="w-3 h-3"></i> 清除</button>
-                    </div>
-                    <div id="sysLog" class="h-48 overflow-y-auto p-3 text-xs font-mono bg-[#141414] leading-relaxed break-all">
-                        <span class="text-gray-500">系統初始化完成，等待連線...</span><br>
-                    </div>
-                </div>
-            </div>
-
-        </div>
-    </main>
-
-    <script>
-        // 渲染圖示
-        lucide.createIcons();
-
-        // ==========================================
-        // 地圖與演算法變數區 (由 Python 翻譯)
-        // ==========================================
-        let mazeDataRows = []; 
-        let num_nodes = 0;
-        let num_prizes = 0;
-        let all_prizes_mask = 0;
-        let adj = {};
-        let prize_val = {};
-        let prize_bit = {};
-        let id_to_coord = {};
-        let memo = {};
-        let best_next = {};
-
-        // 處理 CSV 讀取
-        document.getElementById('csvFileInput').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = function(evt) {
-                let text = evt.target.result;
-                parseCSV(text);
-                document.getElementById('csvStatus').innerText = `已載入: ${file.name} (${mazeDataRows.length} 個節點)`;
-                document.getElementById('csvStatus').className = "text-xs text-win-primary mt-0.5";
-            };
-            reader.readAsText(file);
-        });
-
-        function parseCSV(text) {
-            mazeDataRows = [];
-            text = text.replace(/^\uFEFF/, ""); 
-            let lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
-            if (lines.length < 2) return;
-            
-            let headers = lines[0].split(",");
-            for (let i = 1; i < lines.length; i++) {
-                let values = lines[i].split(",");
-                let rowObj = {};
-                for (let j = 0; j < headers.length; j++) {
-                    let key = headers[j].trim();
-                    rowObj[key] = values[j] ? values[j].trim() : "";
-                }
-                if (rowObj["index"] !== "") {
-                    mazeDataRows.push(rowObj);
-                }
-            }
-        }
-
-        function build_graph(start_node, prize_nodes) {
-            num_nodes = 0;
-            num_prizes = 0;
-            all_prizes_mask = 0;
-            adj = {};
-            prize_val = {};
-            prize_bit = {};
-            id_to_coord = {};
-            memo = {};
-            best_next = {};
-
-            let node_ids = mazeDataRows.map(r => parseInt(r["index"]));
-            num_nodes = node_ids.length;
-
-            node_ids.forEach(u => adj[u] = []);
-            const directions = ["North", "South", "West", "East"];
-
-            mazeDataRows.forEach(row => {
-                let u = parseInt(row["index"]);
-                directions.forEach(d => {
-                    let val = row[d];
-                    if (val !== "") {
-                        adj[u].push(parseInt(parseFloat(val)));
-                    }
-                });
-            });
-
-            let row_map = {};
-            mazeDataRows.forEach(row => row_map[parseInt(row["index"])] = row);
-
-            id_to_coord[start_node] = {r: 0, c: 0};
-            let q = [start_node];
-            const mapping = { "North": {dr:-1, dc:0}, "South": {dr:1, dc:0}, "West": {dr:0, dc:-1}, "East": {dr:0, dc:1} };
-
-            while (q.length > 0) {
-                let u = q.shift();
-                let r = id_to_coord[u].r;
-                let c = id_to_coord[u].c;
-                let row = row_map[u];
-
-                for (let d in mapping) {
-                    let val = row[d];
-                    if (val === "") continue;
-                    let v = parseInt(parseFloat(val));
-                    if (!(v in id_to_coord)) {
-                        id_to_coord[v] = { r: r + mapping[d].dr, c: c + mapping[d].dc };
-                        q.push(v);
-                    }
-                }
-            }
-
-            node_ids.forEach(u => { prize_val[u] = 0; prize_bit[u] = -1; });
-
-            let sr = id_to_coord[start_node].r;
-            let sc = id_to_coord[start_node].c;
-
-            prize_nodes.forEach(node => {
-                if (id_to_coord[node]) {
-                    let dist = Math.abs(id_to_coord[node].r - sr) + Math.abs(id_to_coord[node].c - sc);
-                    prize_val[node] = dist * 10;
-                    prize_bit[node] = num_prizes;
-                    num_prizes++;
-                }
-            });
-
-            all_prizes_mask = (1 << num_prizes) - 1;
-        }
-
-        function dfs(u, k, state) {
-            if (k === 0) return 0;
-            if (state === all_prizes_mask) return 0;
-            let stateKey = `${u},${k},${state}`;
-            if (stateKey in memo) return memo[stateKey];
-
-            let max_future_score = 0;
-            let best_v = -1;
-
-            for (let i = 0; i < adj[u].length; i++) {
-                let next_node = adj[u][i];
-                let next_state = state;
-                let gained_score = 0;
-                let bit = prize_bit[next_node];
-
-                if (bit !== -1 && !(state & (1 << bit))) {
-                    next_state |= (1 << bit);
-                    gained_score = prize_val[next_node];
-                }
-
-                let future_score = dfs(next_node, k - 1, next_state);
-
-                if (gained_score + future_score >= max_future_score) {
-                    max_future_score = gained_score + future_score;
-                    best_v = next_node;
-                }
-            }
-
-            best_next[stateKey] = best_v;
-            memo[stateKey] = max_future_score;
-            return max_future_score;
-        }
-
-        function calculateAutoPath() {
-            if (mazeDataRows.length === 0) {
-                alert("請先匯入 CSV 地圖檔！");
-                return;
-            }
-
-            let startNode = parseInt(document.getElementById('startNode').value);
-            let initDir = parseInt(document.getElementById('initialDir').value);
-            let totalSteps = parseInt(document.getElementById('totalSteps').value);
-            let pStr = document.getElementById('prizeNodes').value;
-            let prizeNodes = pStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-
-            try {
-                build_graph(startNode, prizeNodes);
-                let max_score = dfs(startNode, totalSteps, 0);
-
-                let curr = startNode;
-                let k = totalSteps;
-                let state = 0;
-                let path = [curr];
-
-                while (k > 0) {
-                    if (state === all_prizes_mask) break;
-                    let stateKey = `${curr},${k},${state}`;
-                    if (!(stateKey in best_next)) break;
-                    
-                    let nxt = best_next[stateKey];
-                    if (nxt === -1) break;
-
-                    path.push(nxt);
-                    let bit = prize_bit[nxt];
-                    if (bit !== -1 && !(state & (1 << bit))) {
-                        state |= (1 << bit);
-                    }
-                    curr = nxt;
-                    k--;
-                }
-
-                let car_commands = "";
-                let current_dir = initDir;
-                let sim_state = 0;
-
-                for (let i = 0; i < path.length - 1; i++) {
-                    let u = path[i];
-                    let v = path[i + 1];
-                    let r1 = id_to_coord[u].r; let c1 = id_to_coord[u].c;
-                    let r2 = id_to_coord[v].r; let c2 = id_to_coord[v].c;
-
-                    let target_dir = -1;
-                    if (r2 < r1) target_dir = 0;
-                    else if (c2 > c1) target_dir = 1;
-                    else if (r2 > r1) target_dir = 2;
-                    else if (c2 < c1) target_dir = 3;
-
-                    let turn = (target_dir - current_dir + 4) % 4;
-
-                    if (turn === 0) car_commands += "F";
-                    else if (turn === 1) car_commands += "R";
-                    else if (turn === 2) car_commands += "U";
-                    else if (turn === 3) car_commands += "L";
-
-                    let bit = prize_bit[v];
-                    if (bit !== -1 && !(sim_state & (1 << bit))) {
-                        sim_state |= (1 << bit);
-                    }
-
-                    current_dir = target_dir;
-                }
-
-                document.getElementById('pathResult').classList.remove('hidden');
-                document.getElementById('scoreOut').innerText = max_score;
-                document.getElementById('pathOut').innerText = path.join(" ➔ ");
-                document.getElementById('cmdOut').innerText = car_commands || "(無)";
-                
-                document.getElementById('seqInput').value = car_commands;
-                logMsg("✅ 成功計算最佳路徑並轉為指令", "SYS");
-
-            } catch (err) {
-                alert("計算過程發生錯誤，請確認輸入參數是否與 CSV 匹配。錯誤訊息: " + err);
-            }
-        }
-
-
-        // ==========================================
-        // 藍牙通訊與車輛控制區
-        // ==========================================
-        const SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
-        const CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
-
-        let bluetoothDevice;
-        let gattCharacteristic;
-        let receiveBuffer = "";
-        let rfidRecords = [];
-
-        const connectBtn = document.getElementById('connectBtn');
-        const statusText = document.getElementById('statusText');
-        const statusDot = document.getElementById('statusDot');
-        const carIcon = document.getElementById('carIcon');
-        const sysLog = document.getElementById('sysLog');
-        const rfidCountEl = document.getElementById('rfidCount');
-        const rfidLatestEl = document.getElementById('rfidLatest');
-        const rfidListEl = document.getElementById('rfidList');
-        const paramLogEl = document.getElementById('paramLog');
-
-        function logMsg(msg, type="SYS") {
-            const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
-            let prefix = "SYS";
-            let color = "text-gray-500";
-            if (type === "TX") { prefix = "TX "; color = "text-win-primary"; }
-            else if (type === "RX") { prefix = "RX "; color = "text-green-400"; }
-            else if (type === "ERR") { prefix = "ERR"; color = "text-red-400"; }
-
-            sysLog.innerHTML += `<span class="${color}">[${time} ${prefix}] ${msg}</span><br>`;
-            sysLog.scrollTop = sysLog.scrollHeight;
-        }
-
-        connectBtn.addEventListener('click', async () => {
-            if (gattCharacteristic) {
-                disconnect();
-                return;
-            }
-
-            try {
-                logMsg("請求藍牙裝置...", "SYS");
-                bluetoothDevice = await navigator.bluetooth.requestDevice({
-                    filters: [{ services: [SERVICE_UUID] }],
-                    optionalServices: [SERVICE_UUID]
-                });
-
-                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
-
-                logMsg("連接 GATT...", "SYS");
-                statusText.innerText = "連線中...";
-                statusDot.className = "w-2 h-2 rounded-full bg-yellow-500 animate-pulse";
-
-                const server = await bluetoothDevice.gatt.connect();
-                const service = await server.getPrimaryService(SERVICE_UUID);
-                gattCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
-
-                await gattCharacteristic.startNotifications();
-                gattCharacteristic.addEventListener('characteristicvaluechanged', handleReceive);
-
-                logMsg("✅ 連線成功", "SYS");
-                statusText.innerText = "已連線";
-                statusDot.className = "w-2 h-2 rounded-full bg-green-500";
-                carIcon.classList.replace('text-gray-400', 'text-win-primary');
-                
-                connectBtn.innerText = "斷開";
-                connectBtn.className = "btn-secondary text-white px-6 py-2 shadow-lg";
-
-            } catch (error) {
-                logMsg("連線失敗: " + error, "ERR");
-                statusText.innerText = "未連線";
-                statusDot.className = "w-2 h-2 rounded-full bg-red-500";
-            }
-        });
-
-        function disconnect() {
-            if (bluetoothDevice && bluetoothDevice.gatt.connected) {
-                bluetoothDevice.gatt.disconnect();
-            }
-        }
-
-        function onDisconnected() {
-            logMsg("⚠️ 藍牙已斷開", "SYS");
-            gattCharacteristic = null;
-            statusText.innerText = "未連線";
-            statusDot.className = "w-2 h-2 rounded-full bg-red-500";
-            carIcon.classList.replace('text-win-primary', 'text-gray-400');
-            
-            connectBtn.innerText = "連線藍牙";
-            connectBtn.className = "btn-primary px-6 py-2 shadow-lg";
-        }
-
-        async function sendData(dataStr) {
-            if (!gattCharacteristic) {
-                alert("請先連線藍牙！");
-                return;
-            }
-            try {
-                const encoder = new TextEncoder();
-                await gattCharacteristic.writeValue(encoder.encode(dataStr));
-                logMsg(dataStr, "TX");
-            } catch (error) {
-                logMsg("發送失敗: " + error, "ERR");
-            }
-        }
-
-        function handleReceive(event) {
-            const decoder = new TextDecoder('utf-8');
-            const value = decoder.decode(event.target.value);
-            receiveBuffer += value;
-
-            let lines = receiveBuffer.split(/\r?\n/);
-            receiveBuffer = lines.pop();
-
-            for (let line of lines) {
-                if (line.trim() !== "") {
-                    processIncomingMessage(line.trim());
-                }
-            }
-        }
-
-        function processIncomingMessage(msg) {
-            if (msg.startsWith("UID:")) {
-                const uid = msg.split(":")[1];
-                updateRFID(uid);
-                logMsg(`掃描到卡片: ${uid}`, "SYS");
-            } else {
-                logMsg(msg, "RX");
-            }
-        }
-
-        function sendCmd(cmd) {
-            sendData(cmd);
-        }
-
-        function sendSeq() {
-            let seq = document.getElementById('seqInput').value.trim().toUpperCase();
-            if (!seq) return;
-            
-            const valid = /^[LRUF]+$/.test(seq);
-            if (!valid) {
-                alert("指令只能包含 L, R, U, F！");
-                return;
-            }
-            
-            sendLongString(seq);
-            document.getElementById('seqInput').value = "";
-        }
+    def apply_dark_theme(self):
+        """套用深色流暢設計主題"""
+        self.root.configure(bg="#202020")
+        style = ttk.Style()
+        style.theme_use('clam')
         
-        async function sendLongString(str) {
-            for (let i = 0; i < str.length; i += 15) {
-                let chunk = str.substring(i, i + 15);
-                await sendData(chunk);
-                await new Promise(r => setTimeout(r, 100));
-            }
-        }
+        # 基礎顏色
+        bg_main = "#202020"
+        bg_card = "#2d2d2d"
+        fg_white = "#ffffff"
+        accent = "#4cc2ff"
+        
+        style.configure(".", background=bg_main, foreground=fg_white, font=("Microsoft JhengHei", 10))
+        
+        # 標籤框架 (Card)
+        style.configure("TLabelframe", background=bg_card, borderwidth=1, bordercolor="#333333")
+        style.configure("TLabelframe.Label", background=bg_card, foreground=accent, font=("Microsoft JhengHei", 11, "bold"))
+        
+        # 按鈕
+        style.configure("TButton", background="#3f3f3f", foreground=fg_white, borderwidth=1, bordercolor="#555", padding=5)
+        style.map("TButton", background=[("active", accent)], foreground=[("active", "black")])
+        style.configure("Accent.TButton", background=accent, foreground="black", font=("Microsoft JhengHei", 10, "bold"))
+        
+        # 標籤
+        style.configure("TLabel", background=bg_main, foreground=fg_white)
+        style.configure("Card.TLabel", background=bg_card, foreground=fg_white)
+        
+        # 分頁 (Notebook)
+        style.configure("TNotebook", background=bg_main, borderwidth=0)
+        style.configure("TNotebook.Tab", background="#1e1e1e", foreground="#888", padding=[15, 8], font=("Microsoft JhengHei", 10))
+        style.map("TNotebook.Tab", background=[("selected", bg_card)], foreground=[("selected", accent)])
 
-        function sendParam(param, inputId) {
-            const val = document.getElementById(inputId).value;
-            if (val === "") return;
-            sendData(param + val);
+    def get_entry_style(self):
+        return {"bg": "#1e1e1e", "fg": "white", "insertbackground": "white", "highlightthickness": 1, 
+                "highlightbackground": "#444", "highlightcolor": "#4cc2ff", "relief": "flat"}
+
+    def load_config(self):
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    self.config.update(json.load(f))
+            except: pass
+
+    def save_config(self):
+        try:
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=4)
+        except Exception as e:
+            self.log(f"儲存設定檔失敗: {e}", "ERR")
             
-            // 寫入參數歷史紀錄
-            logParamChange(param, val);
-        }
+    def create_widgets(self):
+        # --- 頂部狀態列 ---
+        top_frame = tk.Frame(self.root, bg="#202020", pady=10, padx=20)
+        top_frame.pack(fill=tk.X)
+        
+        tk.Label(top_frame, text="🚗 循跡車系統", font=("Microsoft JhengHei", 16, "bold"), bg="#202020", fg="white").pack(side=tk.LEFT)
+        
+        self.status_label = tk.Label(top_frame, text="未連線 🔴", font=("Microsoft JhengHei", 12), bg="#202020", fg="#ff5555")
+        self.status_label.pack(side=tk.RIGHT, padx=10)
+        
+        self.connect_btn = ttk.Button(top_frame, text="連線藍牙", command=self.toggle_connection, style="Accent.TButton")
+        self.connect_btn.pack(side=tk.RIGHT)
+        
+        self.port_var = tk.StringVar(value=self.config["PORT"])
+        port_entry = tk.Entry(top_frame, textvariable=self.port_var, width=8, font=("Arial", 12), **self.get_entry_style())
+        port_entry.pack(side=tk.RIGHT, padx=10)
+        tk.Label(top_frame, text="COM埠:", bg="#202020", fg="white").pack(side=tk.RIGHT)
 
-        function logParamChange(param, val) {
-            const emptyText = document.getElementById('paramEmptyText');
-            if (emptyText) emptyText.remove(); // 移除"暫無紀錄"提示
+        # --- 主要分頁 (Notebook) ---
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # 建立分頁
+        self.tab_control = tk.Frame(self.notebook, bg="#2d2d2d", padx=15, pady=15)
+        self.tab_scoreboard = tk.Frame(self.notebook, bg="#2d2d2d", padx=15, pady=15)
+        self.tab_map = tk.Frame(self.notebook, bg="#2d2d2d", padx=15, pady=15)
+        self.tab_params = tk.Frame(self.notebook, bg="#2d2d2d", padx=15, pady=15)
+        self.tab_logs = tk.Frame(self.notebook, bg="#2d2d2d", padx=15, pady=15)
+        
+        self.notebook.add(self.tab_control, text="🎮 控制面板")
+        self.notebook.add(self.tab_scoreboard, text="🏆 計分板設定")
+        self.notebook.add(self.tab_map, text="🗺️ 路徑規劃")
+        self.notebook.add(self.tab_params, text="⚙️ 參數設定")
+        self.notebook.add(self.tab_logs, text="📜 系統日誌")
+        
+        self.build_control_tab()
+        self.build_scoreboard_tab()
+        self.build_map_tab()
+        self.build_params_tab()
+        self.build_logs_tab()
 
-            const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
+    def build_control_tab(self):
+        # 左右分欄
+        left_col = tk.Frame(self.tab_control, bg="#2d2d2d")
+        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        
+        right_col = tk.Frame(self.tab_control, bg="#2d2d2d")
+        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # -- 左欄: 動作控制 --
+        cmd_frame = ttk.LabelFrame(left_col, text="單步動作控制", padding=15)
+        cmd_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        grid_f = tk.Frame(cmd_frame, bg="#2d2d2d")
+        grid_f.pack(pady=10)
+        
+        btn_style = {"font": ("Arial", 16, "bold"), "width": 5, "height": 2, "bg": "#3f3f3f", "fg": "white", "relief": "flat", "activebackground": "#4cc2ff"}
+        
+        # 十字方向鍵
+        tk.Button(grid_f, text="F\n↑", command=lambda: self.send_cmd("F"), **btn_style).grid(row=0, column=1, padx=5, pady=5)
+        tk.Button(grid_f, text="L\n←", command=lambda: self.send_cmd("L"), **btn_style).grid(row=1, column=0, padx=5, pady=5)
+        tk.Button(grid_f, text="U\n↺", command=lambda: self.send_cmd("U"), **btn_style).grid(row=1, column=1, padx=5, pady=5)
+        tk.Button(grid_f, text="R\n→", command=lambda: self.send_cmd("R"), **btn_style).grid(row=1, column=2, padx=5, pady=5)
+
+        seq_frame = ttk.LabelFrame(left_col, text="連續指令發送", padding=15)
+        seq_frame.pack(fill=tk.X)
+        tk.Label(seq_frame, text="請輸入路徑字串 (例: FFLRU)", bg="#2d2d2d", fg="#aaa").pack(anchor=tk.W, pady=(0, 5))
+        
+        input_f = tk.Frame(seq_frame, bg="#2d2d2d")
+        input_f.pack(fill=tk.X)
+        self.seq_var = tk.StringVar()
+        seq_entry = tk.Entry(input_f, textvariable=self.seq_var, font=("Courier", 14), **self.get_entry_style())
+        seq_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=4)
+        seq_entry.bind("<Return>", lambda e: self.send_sequence())
+        ttk.Button(input_f, text="發送", command=self.send_sequence, style="Accent.TButton").pack(side=tk.RIGHT)
+
+        # -- 右欄: RFID 儀表板與計分 --
+        rfid_frame = ttk.LabelFrame(right_col, text="RFID 與計分資訊", padding=15)
+        rfid_frame.pack(fill=tk.BOTH, expand=True)
+        
+        top_r = tk.Frame(rfid_frame, bg="#2d2d2d")
+        top_r.pack(fill=tk.X, pady=(0, 10))
+        self.rfid_count_var = tk.StringVar(value="總掃描次數: 0")
+        tk.Label(top_r, textvariable=self.rfid_count_var, font=("Microsoft JhengHei", 12), bg="#2d2d2d", fg="white").pack(side=tk.LEFT)
+        
+        # 顯示官方總分
+        self.official_score_var = tk.StringVar(value="官方總分: 0")
+        tk.Label(top_r, textvariable=self.official_score_var, font=("Microsoft JhengHei", 12, "bold"), bg="#2d2d2d", fg="#a6e22e").pack(side=tk.LEFT, padx=15)
+        
+        ttk.Button(top_r, text="清空本地紀錄", command=self.clear_rfid_records).pack(side=tk.RIGHT)
+        
+        self.rfid_latest_var = tk.StringVar(value="最新卡片: (無)")
+        tk.Label(rfid_frame, textvariable=self.rfid_latest_var, font=("Courier", 14, "bold"), bg="#2d2d2d", fg="#4cc2ff").pack(anchor=tk.W, pady=5)
+        
+        self.time_rem_var = tk.StringVar(value="剩餘時間: -")
+        tk.Label(rfid_frame, textvariable=self.time_rem_var, font=("Microsoft JhengHei", 10), bg="#2d2d2d", fg="#ffaa00").pack(anchor=tk.W, pady=(0,5))
+        
+        self.rfid_listbox = tk.Listbox(rfid_frame, font=("Courier", 11), bg="#1e1e1e", fg="#ddd", selectbackground="#4cc2ff", relief="flat", highlightthickness=1, highlightbackground="#444")
+        self.rfid_listbox.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+
+    def build_scoreboard_tab(self):
+        top_f = tk.Frame(self.tab_scoreboard, bg="#2d2d2d")
+        top_f.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(top_f, text="計分板連線設定", font=("Microsoft JhengHei", 14, "bold"), bg="#2d2d2d", fg="#4cc2ff").pack(side=tk.LEFT)
+        self.sb_status_var = tk.StringVar(value="計分板: 未啟動")
+        tk.Label(top_f, textvariable=self.sb_status_var, font=("Microsoft JhengHei", 12), bg="#2d2d2d", fg="#ff5555").pack(side=tk.RIGHT)
+
+        cfg_frame = ttk.LabelFrame(self.tab_scoreboard, text="連線參數", padding=15)
+        cfg_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        def add_row(parent, label_text, var, w=30):
+            f = tk.Frame(parent, bg="#2d2d2d")
+            f.pack(fill=tk.X, pady=5)
+            tk.Label(f, text=label_text, bg="#2d2d2d", fg="white", width=15, anchor=tk.W).pack(side=tk.LEFT)
+            tk.Entry(f, textvariable=var, font=("Arial", 11), width=w, **self.get_entry_style()).pack(side=tk.LEFT)
+            return f
             
-            const paramNames = {
-                'P': 'Kp', 'I': 'Ki', 'D': 'Kd',
-                'X': '左轉(X)延遲', 'Y': '右轉(Y)延遲', 'Z': '迴轉(Z)延遲'
-            };
-            const pName = paramNames[param] || param;
+        self.sb_mode_var = tk.StringVar(value=self.config.get("SB_MODE", "1"))
+        self.sb_team_var = tk.StringVar(value=self.config.get("SB_TEAM", "YOUR_TEAM_NAME"))
+        self.sb_url_var = tk.StringVar(value=self.config.get("SB_URL", "http://carcar.ntuee.org/scoreboard"))
+        self.sb_file_var = tk.StringVar(value=self.config.get("SB_FILE", "data/fakeUID.csv"))
+        
+        # Mode Selection
+        mode_f = tk.Frame(cfg_frame, bg="#2d2d2d")
+        mode_f.pack(fill=tk.X, pady=5)
+        tk.Label(mode_f, text="計分模式:", bg="#2d2d2d", fg="white", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        mode_cb = ttk.Combobox(mode_f, textvariable=self.sb_mode_var, values=["0", "1"], width=8, state="readonly")
+        mode_cb.pack(side=tk.LEFT)
+        tk.Label(mode_f, text="(0: Server伺服器, 1: Fake本地端)", bg="#2d2d2d", fg="#888").pack(side=tk.LEFT, padx=10)
+        
+        add_row(cfg_frame, "隊伍名稱 (Team):", self.sb_team_var)
+        add_row(cfg_frame, "伺服器 URL:", self.sb_url_var, w=40)
+        
+        file_f = add_row(cfg_frame, "Fake CSV 檔案:", self.sb_file_var, w=30)
+        ttk.Button(file_f, text="瀏覽...", command=self.load_fake_csv).pack(side=tk.LEFT, padx=10)
+        
+        btn_f = tk.Frame(self.tab_scoreboard, bg="#2d2d2d")
+        btn_f.pack(fill=tk.X, pady=15)
+        self.btn_connect_sb = ttk.Button(btn_f, text="🚀 連線/初始化計分板", command=self.init_scoreboard, style="Accent.TButton")
+        self.btn_connect_sb.pack(fill=tk.X, ipady=5)
 
-            let item = document.createElement('div');
-            item.className = "flex items-center justify-between py-1 border-b border-white/5";
-            item.innerHTML = `<span class="text-gray-500">[${time}]</span> <span class="text-gray-200">設定 <span class="text-win-primary font-bold">${pName}</span> = ${val}</span>`;
+    def build_map_tab(self):
+        top_f = tk.Frame(self.tab_map, bg="#2d2d2d")
+        top_f.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Button(top_f, text="📁 匯入 maze.csv", command=self.load_csv_file).pack(side=tk.LEFT, padx=(0, 10))
+        self.csv_status_var = tk.StringVar(value="尚未匯入地圖資料")
+        tk.Label(top_f, textvariable=self.csv_status_var, bg="#2d2d2d", fg="#aaa").pack(side=tk.LEFT)
+
+        cfg_frame = ttk.LabelFrame(self.tab_map, text="演算法參數", padding=15)
+        cfg_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        def add_row(parent, label_text, var, w=10):
+            f = tk.Frame(parent, bg="#2d2d2d")
+            f.pack(fill=tk.X, pady=5)
+            tk.Label(f, text=label_text, bg="#2d2d2d", fg="white", width=15, anchor=tk.W).pack(side=tk.LEFT)
+            tk.Entry(f, textvariable=var, font=("Arial", 11), width=w, **self.get_entry_style()).pack(side=tk.LEFT)
             
-            paramLogEl.appendChild(item);
-            paramLogEl.scrollTop = paramLogEl.scrollHeight;
-        }
+        self.map_start_var = tk.StringVar(value="1")
+        self.map_dir_var = tk.StringVar(value="3")
+        self.map_steps_var = tk.StringVar(value="80")
+        self.map_prizes_var = tk.StringVar(value="1,6,12,13,16,22,34,43,46,47")
+        
+        add_row(cfg_frame, "起點 Node:", self.map_start_var)
+        
+        dir_f = tk.Frame(cfg_frame, bg="#2d2d2d")
+        dir_f.pack(fill=tk.X, pady=5)
+        tk.Label(dir_f, text="初始方向:", bg="#2d2d2d", fg="white", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        dir_cb = ttk.Combobox(dir_f, textvariable=self.map_dir_var, values=["0", "1", "2", "3"], width=8, state="readonly")
+        dir_cb.pack(side=tk.LEFT)
+        tk.Label(dir_f, text="(0北 1東 2南 3西)", bg="#2d2d2d", fg="#888").pack(side=tk.LEFT, padx=10)
+        
+        add_row(cfg_frame, "總步數:", self.map_steps_var)
+        add_row(cfg_frame, "獎品 Nodes:", self.map_prizes_var, w=40)
+        
+        ttk.Button(self.tab_map, text="🚀 計算最佳路徑與指令", command=self.calc_map_path, style="Accent.TButton").pack(fill=tk.X, pady=(0, 15), ipady=5)
 
-        function clearParamLog() {
-            paramLogEl.innerHTML = '<span class="text-gray-500" id="paramEmptyText">暫無紀錄...</span>';
-        }
+        res_frame = ttk.LabelFrame(self.tab_map, text="運算結果", padding=15)
+        res_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.res_score_var = tk.StringVar(value="最高分: -")
+        self.res_path_var = tk.StringVar(value="路徑: -")
+        self.res_cmd_var = tk.StringVar(value="產出指令: -")
+        
+        tk.Label(res_frame, textvariable=self.res_score_var, font=("Microsoft JhengHei", 12, "bold"), bg="#2d2d2d", fg="#4cc2ff", anchor=tk.W).pack(fill=tk.X, pady=2)
+        tk.Label(res_frame, textvariable=self.res_path_var, bg="#2d2d2d", fg="#ddd", wraplength=700, justify=tk.LEFT, anchor=tk.W).pack(fill=tk.X, pady=5)
+        
+        cmd_l = tk.Label(res_frame, textvariable=self.res_cmd_var, font=("Courier", 12, "bold"), bg="#1e1e1e", fg="#a6e22e", wraplength=700, justify=tk.LEFT, anchor=tk.W, padx=10, pady=10, borderwidth=1, relief="solid")
+        cmd_l.pack(fill=tk.X, pady=5)
+        tk.Label(res_frame, text="* 指令已自動同步至「控制面板」的連續指令框", bg="#2d2d2d", fg="#aaa").pack(anchor=tk.W)
 
-        function updateRFID(uid) {
-            rfidRecords.push(uid);
-            rfidCountEl.innerText = rfidRecords.length;
-            rfidLatestEl.innerText = uid;
+    def build_params_tab(self):
+        top_f = tk.Frame(self.tab_params, bg="#2d2d2d")
+        top_f.pack(fill=tk.X, pady=(0, 10))
+        
+        # 參數調整區
+        pid_f = ttk.LabelFrame(top_f, text="PID 設定", padding=15)
+        pid_f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        turn_f = ttk.LabelFrame(top_f, text="轉彎延遲 (ms)", padding=15)
+        turn_f.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        self.p_var = tk.StringVar(value=self.config["P"])
+        self.i_var = tk.StringVar(value=self.config["I"])
+        self.d_var = tk.StringVar(value=self.config["D"])
+        self.x_var = tk.StringVar(value=self.config["X"])
+        self.y_var = tk.StringVar(value=self.config["Y"])
+        self.z_var = tk.StringVar(value=self.config["Z"])
+        
+        def make_param_row(parent, label, var, p_key, is_int=False):
+            f = tk.Frame(parent, bg="#2d2d2d")
+            f.pack(fill=tk.X, pady=5)
+            tk.Label(f, text=label, width=6, bg="#2d2d2d", fg="white", font=("Courier", 11, "bold")).pack(side=tk.LEFT)
+            tk.Entry(f, textvariable=var, width=10, font=("Arial", 11), **self.get_entry_style()).pack(side=tk.LEFT, padx=10)
+            v_type = int if is_int else float
+            ttk.Button(f, text="套用", command=lambda: self.send_param(p_key, var.get(), v_type)).pack(side=tk.RIGHT)
+
+        make_param_row(pid_f, "Kp:", self.p_var, "P")
+        make_param_row(pid_f, "Ki:", self.i_var, "I")
+        make_param_row(pid_f, "Kd:", self.d_var, "D")
+        
+        make_param_row(turn_f, "左(X):", self.x_var, "X", True)
+        make_param_row(turn_f, "右(Y):", self.y_var, "Y", True)
+        make_param_row(turn_f, "迴(Z):", self.z_var, "Z", True)
+
+        # 參數歷史紀錄區
+        hist_f = ttk.LabelFrame(self.tab_params, text="參數調整歷史紀錄", padding=10)
+        hist_f.pack(fill=tk.BOTH, expand=True)
+        
+        btn_f = tk.Frame(hist_f, bg="#2d2d2d")
+        btn_f.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(btn_f, text="清除紀錄", command=self.clear_param_log).pack(side=tk.RIGHT)
+        
+        self.param_log_text = scrolledtext.ScrolledText(hist_f, wrap=tk.WORD, bg="#1e1e1e", fg="#ddd", font=("Courier", 10), relief="flat", highlightthickness=1, highlightbackground="#444")
+        self.param_log_text.pack(fill=tk.BOTH, expand=True)
+        self.param_log_text.insert(tk.END, "等待參數調整...\n")
+        self.param_log_text.config(state='disabled')
+
+    def build_logs_tab(self):
+        btn_f = tk.Frame(self.tab_logs, bg="#2d2d2d")
+        btn_f.pack(fill=tk.X, pady=(0, 10))
+        ttk.Button(btn_f, text="清除日誌", command=lambda: self.log_text.config(state='normal') or self.log_text.delete(1.0, tk.END) or self.log_text.config(state='disabled')).pack(side=tk.RIGHT)
+        
+        self.log_text = scrolledtext.ScrolledText(self.tab_logs, wrap=tk.WORD, bg="#141414", fg="#a6e22e", font=("Courier", 10), relief="flat")
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.config(state='disabled')
+
+    # ==========================
+    # Scoreboard 計分板功能
+    # ==========================
+    def load_fake_csv(self):
+        filepath = filedialog.askopenfilename(title="選擇 fakeUID.csv", filetypes=[("CSV Files", "*.csv")])
+        if filepath:
+            self.sb_file_var.set(filepath)
+
+    def init_scoreboard(self):
+        mode = self.sb_mode_var.get()
+        team = self.sb_team_var.get().strip()
+        
+        self.config["SB_MODE"] = mode
+        self.config["SB_TEAM"] = team
+        self.config["SB_URL"] = self.sb_url_var.get().strip()
+        self.config["SB_FILE"] = self.sb_file_var.get().strip()
+        self.save_config()
+
+        try:
+            if mode == "0":
+                if not HAS_SOCKETIO:
+                    messagebox.showerror("錯誤", "缺少 python-socketio 套件，無法連線！")
+                    return
+                self.log(f"正在連線至計分伺服器: {self.config['SB_URL']} (隊伍: {team})", "SYS")
+                self.scoreboard = ScoreboardServer(team, self.config['SB_URL'], False, self.log)
+            else:
+                self.log(f"啟動本地 Fake 計分板 (檔案: {self.config['SB_FILE']})", "SYS")
+                self.scoreboard = ScoreboardFake(team, self.config['SB_FILE'], self.log)
             
-            let item = document.createElement('div');
-            item.className = "flex items-center justify-between py-1 border-b border-white/5";
-            item.innerHTML = `<span class="text-gray-500">#${rfidRecords.length}</span> <span class="text-gray-200">UID: ${uid}</span>`;
-            rfidListEl.appendChild(item);
-            rfidListEl.scrollTop = rfidListEl.scrollHeight;
-        }
+            self.sb_status_var.set("計分板: 已啟動 🟢")
+            self.official_score_var.set("官方總分: 0")
+            self.time_rem_var.set("剩餘時間: -")
+            messagebox.showinfo("成功", "計分板初始化/連線成功！")
+            
+        except Exception as e:
+            self.log(f"計分板初始化失敗: {e}", "ERR")
+            self.sb_status_var.set("計分板: 錯誤 🔴")
+            messagebox.showerror("初始化錯誤", f"計分板初始化失敗:\n{e}")
 
-        function clearRFID() {
-            rfidRecords = [];
-            rfidCountEl.innerText = "0";
-            rfidLatestEl.innerText = "(無)";
-            rfidListEl.innerHTML = "";
-            logMsg("已清空 UI 紀錄", "SYS");
-        }
-    </script>
-</body>
-</html>
+    def _report_uid_to_scoreboard(self, uid):
+        if not self.scoreboard:
+            return
+            
+        try:
+            score_got, time_rem = self.scoreboard.add_UID(uid)
+            current_total = self.scoreboard.get_current_score()
+            
+            if current_total is not None:
+                self.root.after(0, lambda: self.official_score_var.set(f"官方總分: {current_total}"))
+            if time_rem is not None:
+                self.root.after(0, lambda: self.time_rem_var.set(f"剩餘時間: {time_rem}s"))
+                
+        except Exception as e:
+            self.log(f"回報 UID 給計分板時發生錯誤: {e}", "ERR")
+
+    # ==========================
+    # 地圖與 DFS 功能
+    # ==========================
+    def load_csv_file(self):
+        filepath = filedialog.askopenfilename(title="選擇 maze.csv", filetypes=[("CSV Files", "*.csv")])
+        if filepath:
+            try:
+                count = self.maze_solver.load_csv_data(filepath)
+                self.csv_status_var.set(f"✅ 已載入: {os.path.basename(filepath)} ({count} 個節點)")
+                self.log(f"成功匯入地圖: {filepath}", "SYS")
+            except Exception as e:
+                messagebox.showerror("讀取失敗", f"無法讀取 CSV: {e}")
+
+    def calc_map_path(self):
+        if not self.maze_solver.rows:
+            messagebox.showwarning("警告", "請先匯入 CSV 地圖檔！")
+            return
+            
+        try:
+            start_n = int(self.map_start_var.get())
+            init_d = int(self.map_dir_var.get())
+            steps = int(self.map_steps_var.get())
+            p_nodes = [int(s.strip()) for s in self.map_prizes_var.get().split(',') if s.strip().isdigit()]
+            
+            score, path, cmds = self.maze_solver.calculate(start_n, init_d, steps, p_nodes)
+            
+            self.res_score_var.set(f"最高分預測: {score}")
+            self.res_path_var.set(f"經過路徑: {' ➔ '.join(map(str, path))}")
+            self.res_cmd_var.set(f"產出指令: {cmds if cmds else '(無)'}")
+            
+            self.seq_var.set(cmds)
+            self.notebook.select(self.tab_control) # 切換回控制面板
+            self.log("DFS 路徑計算完成，指令已同步", "SYS")
+            
+        except Exception as e:
+            messagebox.showerror("計算錯誤", f"參數輸入錯誤或演算法發生例外:\n{e}")
+
+    # ==========================
+    # 通用 UI 功能
+    # ==========================
+    def log(self, message, source="SYS"):
+        self.root.after(0, self._safe_log, message, source)
+
+    def _safe_log(self, message, source):
+        self.log_text.config(state='normal')
+        time_str = time.strftime("%H:%M:%S")
+        
+        prefix = f"[{time_str}] ⚙️ SYS: "
+        color = "white"
+        if source == "TX": 
+            prefix = f"[{time_str}] 📤 TX: "
+            color = "#4cc2ff"
+        elif source == "RX": 
+            prefix = f"[{time_str}] 📥 RX: "
+            color = "#a6e22e"
+        elif source == "ERR": 
+            prefix = f"[{time_str}] ❌ ERR: "
+            color = "#ff5555"
+            
+        self.log_text.insert(tk.END, f"{prefix}{message}\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state='disabled')
+        
+    def log_param_history(self, param, value):
+        self.param_log_text.config(state='normal')
+        time_str = time.strftime("%H:%M:%S")
+        name_map = {'P':'Kp', 'I':'Ki', 'D':'Kd', 'X':'左轉(X)', 'Y':'右轉(Y)', 'Z':'迴轉(Z)'}
+        p_name = name_map.get(param, param)
+        
+        msg = f"[{time_str}] 設定 {p_name} = {value}\n"
+        self.param_log_text.insert(tk.END, msg)
+        self.param_log_text.see(tk.END)
+        self.param_log_text.config(state='disabled')
+        
+    def clear_param_log(self):
+        self.param_log_text.config(state='normal')
+        self.param_log_text.delete(1.0, tk.END)
+        self.param_log_text.insert(tk.END, "等待參數調整...\n")
+        self.param_log_text.config(state='disabled')
+
+    def show_startup_error(self):
+        self.log(f"無法載入 hm10_esp32，原因：{IMPORT_ERROR_MSG}", "ERR")
+        self.connect_btn.config(state='disabled')
+        self.status_label.config(text="模組遺失 ❌")
+        messagebox.showerror("啟動錯誤", f"找不到藍牙模組檔案或發生錯誤！\n\n詳細原因:\n{IMPORT_ERROR_MSG}")
+
+    def update_rfid_display(self, uid_code):
+        self.rfid_records.append(uid_code)
+        count = len(self.rfid_records)
+        self.rfid_count_var.set(f"總掃描次數: {count}")
+        self.rfid_latest_var.set(f"最新卡片: {uid_code}")
+        self.rfid_listbox.insert(tk.END, f" #{count:02d} | UID: {uid_code}")
+        self.rfid_listbox.yview(tk.END)
+        
+        # 在背景回報給計分板
+        threading.Thread(target=self._report_uid_to_scoreboard, args=(uid_code,), daemon=True).start()
+        
+    def clear_rfid_records(self):
+        self.rfid_records.clear()
+        self.rfid_count_var.set("總掃描次數: 0")
+        self.rfid_latest_var.set("最新卡片: (無)")
+        self.rfid_listbox.delete(0, tk.END)
+        self.log("已清空 UI 的 RFID 紀錄", "SYS")
+
+    # ==========================
+    # 藍牙通訊功能
+    # ==========================
+    def toggle_connection(self):
+        if not HAS_HM10: return
+
+        if not self.is_connected:
+            port = self.port_var.get().strip()
+            self.config["PORT"] = port
+            self.save_config() 
+            
+            self.log(f"正在嘗試連線至 {port}...")
+            self.connect_btn.config(state='disabled')
+            self.status_label.config(text="連線中 🟡", fg="#f1fa8c")
+            self.root.update()
+            
+            try:
+                self.bridge = HM10ESP32Bridge(port=port)
+                time.sleep(1)
+                
+                self.is_connected = True
+                self.status_label.config(text="已連線 🟢", fg="#a6e22e")
+                self.connect_btn.config(text="斷開連線", state='normal')
+                self.log("連線成功！", "SYS")
+                
+                threading.Thread(target=self.receive_loop, daemon=True).start()
+                
+            except Exception as e:
+                self.log(f"連線失敗: {e}", "ERR")
+                self.status_label.config(text="未連線 🔴", fg="#ff5555")
+                self.connect_btn.config(state='normal')
+                messagebox.showerror("連線錯誤", f"無法連線至 {port}\n請確認車子已開機且 USB 有插好。")
+        else:
+            self.is_connected = False
+            self.bridge = None 
+            self.status_label.config(text="未連線 🔴", fg="#ff5555")
+            self.connect_btn.config(text="連線藍牙")
+            self.log("已斷開連線。", "SYS")
+
+    def send_cmd(self, cmd):
+        if not self.is_connected or not self.bridge:
+            messagebox.showwarning("未連線", "請先連線藍牙模組！")
+            return
+        try:
+            self.bridge.send(cmd)
+            self.log(cmd, source="TX")
+        except Exception as e:
+            self.log(f"發送失敗: {e}", "ERR")
+
+    def send_sequence(self):
+        if not self.is_connected or not self.bridge:
+            messagebox.showwarning("未連線", "請先連線藍牙模組！")
+            return
+            
+        seq = self.seq_var.get().strip().upper()
+        if not seq: return
+            
+        invalid_chars = [c for c in seq if c not in set("LRUF")]
+        if invalid_chars:
+            messagebox.showerror("格式錯誤", f"包含無效字元: {', '.join(invalid_chars)}\n(手動連續指令已移除 S 與 C，僅限 L, R, U, F)")
+            return
+            
+        try:
+            threading.Thread(target=self._send_long_string, args=(seq,), daemon=True).start()
+            self.seq_var.set("")
+        except Exception as e:
+            self.log(f"發送失敗: {e}", "ERR")
+
+    def _send_long_string(self, seq):
+        try:
+            self.log(f"開始發送長指令: {seq}", source="TX")
+            for i in range(0, len(seq), 15):
+                chunk = seq[i:i+15]
+                if self.bridge and self.is_connected:
+                    self.bridge.send(chunk)
+                    time.sleep(0.1) 
+        except Exception as e:
+            self.log(f"長指令發送中斷: {e}", "ERR")
+
+    def send_param(self, param, value, val_type=float):
+        if not self.is_connected or not self.bridge:
+            messagebox.showwarning("未連線", "請先連線藍牙模組！")
+            return
+        try:
+            parsed_val = val_type(value) 
+            cmd = f"{param}{parsed_val}"
+            
+            self.bridge.send(cmd)
+            self.log(cmd, source="TX")
+            self.log_param_history(param, parsed_val)
+            
+            self.config[param] = str(parsed_val)
+            self.save_config()
+            
+        except ValueError:
+            messagebox.showerror("格式錯誤", "輸入的數值格式不正確！")
+        except Exception as e:
+            self.log(f"發送失敗: {e}", "ERR")
+
+    def receive_loop(self):
+        while self.is_connected:
+            try:
+                if self.bridge:
+                    msg = self.bridge.listen()
+                    if msg:
+                        msg_str = str(msg).strip()
+                        if msg_str.startswith("UID:"):
+                            uid_code = msg_str.split(":")[1]
+                            self.root.after(0, lambda u=uid_code: self.update_rfid_display(u))
+                            self.log(f"成功掃描卡片: {uid_code}", source="SYS")
+                        else:
+                            self.log(msg_str, source="RX")
+            except Exception as e:
+                self.log(f"接收斷線: {e}", "ERR")
+                self.is_connected = False
+                self.root.after(0, lambda: self.status_label.config(text="連線中斷 🔴", fg="#ff5555"))
+                self.root.after(0, lambda: self.connect_btn.config(text="連線藍牙"))
+                break
+            time.sleep(0.05)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = CarControllerApp(root)
+    root.protocol("WM_DELETE_WINDOW", lambda: (root.destroy(), sys.exit()))
+    print("GUI 建立完成，進入主迴圈。")
+    root.mainloop()
