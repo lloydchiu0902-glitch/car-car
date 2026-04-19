@@ -6,9 +6,10 @@
     <title>🚗 藍牙循跡車 APP</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        /* 防止雙擊放大等手機預設行為 */
         button { touch-action: manipulation; }
         .log-box { font-family: monospace; font-size: 0.85rem; }
+        /* 隱藏預設檔案上傳按鈕，使用自訂按鈕 */
+        input[type="file"] { display: none; }
     </style>
 </head>
 <body class="bg-slate-100 text-slate-800 pb-10">
@@ -24,6 +25,54 @@
     <div class="px-4 mt-2">
         <p id="statusText" class="text-sm text-red-500 font-bold text-right mt-1">狀態: 未連線</p>
     </div>
+
+    <!-- 🗺️ 地圖與自動路徑規劃區 -->
+    <section class="m-4 bg-yellow-50 p-4 rounded-xl shadow-sm border-l-4 border-yellow-500">
+        <h2 class="text-lg font-bold mb-3 border-b border-yellow-200 pb-2">🗺️ 自動路徑規劃 (匯入 CSV)</h2>
+        
+        <div class="mb-3">
+            <label class="bg-yellow-500 text-white px-4 py-2 rounded font-bold shadow cursor-pointer active:bg-yellow-600 inline-block w-full text-center">
+                📁 點此匯入 maze.csv 檔案
+                <input type="file" id="csvFileInput" accept=".csv">
+            </label>
+            <p id="csvStatus" class="text-xs text-gray-500 mt-1 text-center">尚未匯入地圖資料</p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 text-sm mb-3">
+            <div>
+                <label class="font-bold text-gray-700 block">起點 Node:</label>
+                <input type="number" id="startNode" value="1" class="border rounded px-2 py-1 w-full">
+            </div>
+            <div>
+                <label class="font-bold text-gray-700 block">初始方向:</label>
+                <select id="initialDir" class="border rounded px-2 py-1 w-full">
+                    <option value="0">北 (0)</option>
+                    <option value="1">東 (1)</option>
+                    <option value="2">南 (2)</option>
+                    <option value="3" selected>西 (3)</option>
+                </select>
+            </div>
+            <div class="col-span-2">
+                <label class="font-bold text-gray-700 block">獎品 Nodes (用逗號隔開):</label>
+                <input type="text" id="prizeNodes" value="1,6,12,13,16,22,34,43,46,47" class="border rounded px-2 py-1 w-full">
+            </div>
+            <div class="col-span-2">
+                <label class="font-bold text-gray-700 block">總步數 (Total Steps):</label>
+                <input type="number" id="totalSteps" value="80" class="border rounded px-2 py-1 w-full">
+            </div>
+        </div>
+
+        <button onclick="calculateAutoPath()" class="bg-slate-800 text-white px-4 py-2 rounded font-bold shadow active:bg-slate-900 w-full mb-2">
+            🚀 計算最佳路徑與指令
+        </button>
+        
+        <div id="pathResult" class="hidden bg-white p-2 rounded text-sm text-gray-700 border border-yellow-200">
+            <p class="font-bold text-blue-600">最高分: <span id="scoreOut">0</span></p>
+            <p class="mt-1 font-bold">路徑: <span id="pathOut" class="font-normal text-xs"></span></p>
+            <p class="mt-1 font-bold text-green-600">產出指令 (已同步至下方輸入框):</p>
+            <p id="cmdOut" class="font-mono text-xs break-all bg-gray-100 p-1 rounded"></p>
+        </div>
+    </section>
 
     <!-- 動作控制區 -->
     <section class="m-4 bg-white p-4 rounded-xl shadow-sm">
@@ -45,8 +94,8 @@
         <div class="mt-4 mt-4">
             <h3 class="text-sm font-bold text-gray-600 mb-1">連續指令 (如 FFLRUS):</h3>
             <div class="flex gap-2">
-                <input type="text" id="seqInput" class="border rounded px-3 py-2 flex-1 text-lg uppercase" placeholder="輸入指令...">
-                <button onclick="sendSeq()" class="bg-slate-700 text-white px-4 rounded font-bold">送出</button>
+                <input type="text" id="seqInput" class="border rounded px-3 py-2 flex-1 text-lg uppercase font-mono" placeholder="輸入指令...">
+                <button onclick="sendSeq()" class="bg-slate-700 text-white px-4 rounded font-bold shadow">送出</button>
             </div>
         </div>
     </section>
@@ -62,7 +111,7 @@
     </section>
 
     <!-- 參數調整區 -->
-    <section class="m-4 bg-white p-4 rounded-xl shadow-sm">
+    <section class="m-4 bg-white p-4 rounded-xl shadow-sm border-l-4 border-blue-500">
         <h2 class="text-lg font-bold mb-3 border-b pb-2">⚙️ 參數調整</h2>
         
         <div class="grid grid-cols-2 gap-4">
@@ -117,8 +166,251 @@
     </section>
 
     <script>
-        // --- 藍牙變數設定 ---
-        // HM-10 預設 UUID
+        // ==========================================
+        // 地圖與演算法變數區 (由 Python 翻譯)
+        // ==========================================
+        let mazeDataRows = []; 
+        let num_nodes = 0;
+        let num_prizes = 0;
+        let all_prizes_mask = 0;
+        let adj = {};
+        let prize_val = {};
+        let prize_bit = {};
+        let id_to_coord = {};
+        let memo = {};
+        let best_next = {};
+
+        // 處理 CSV 讀取
+        document.getElementById('csvFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                let text = evt.target.result;
+                parseCSV(text);
+                document.getElementById('csvStatus').innerText = `✅ 已載入: ${file.name} (共 ${mazeDataRows.length} 個節點)`;
+                document.getElementById('csvStatus').className = "text-xs text-green-600 mt-1 text-center font-bold";
+            };
+            reader.readAsText(file);
+        });
+
+        function parseCSV(text) {
+            mazeDataRows = [];
+            // 處理 BOM 和換行
+            text = text.replace(/^\uFEFF/, ""); 
+            let lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
+            if (lines.length < 2) return;
+            
+            let headers = lines[0].split(",");
+            for (let i = 1; i < lines.length; i++) {
+                let values = lines[i].split(",");
+                let rowObj = {};
+                for (let j = 0; j < headers.length; j++) {
+                    let key = headers[j].trim();
+                    rowObj[key] = values[j] ? values[j].trim() : "";
+                }
+                if (rowObj["index"] !== "") {
+                    mazeDataRows.append(rowObj);
+                }
+            }
+        }
+
+        function build_graph(start_node, prize_nodes) {
+            num_nodes = 0;
+            num_prizes = 0;
+            all_prizes_mask = 0;
+            adj = {};
+            prize_val = {};
+            prize_bit = {};
+            id_to_coord = {};
+            memo = {};
+            best_next = {};
+
+            let node_ids = mazeDataRows.map(r => parseInt(r["index"]));
+            num_nodes = node_ids.length;
+
+            node_ids.forEach(u => adj[u] = []);
+            const directions = ["North", "South", "West", "East"];
+
+            mazeDataRows.forEach(row => {
+                let u = parseInt(row["index"]);
+                directions.forEach(d => {
+                    let val = row[d];
+                    if (val !== "") {
+                        adj[u].push(parseInt(parseFloat(val)));
+                    }
+                });
+            });
+
+            let row_map = {};
+            mazeDataRows.forEach(row => row_map[parseInt(row["index"])] = row);
+
+            id_to_coord[start_node] = {r: 0, c: 0};
+            let q = [start_node];
+            const mapping = { "North": {dr:-1, dc:0}, "South": {dr:1, dc:0}, "West": {dr:0, dc:-1}, "East": {dr:0, dc:1} };
+
+            while (q.length > 0) {
+                let u = q.shift();
+                let r = id_to_coord[u].r;
+                let c = id_to_coord[u].c;
+                let row = row_map[u];
+
+                for (let d in mapping) {
+                    let val = row[d];
+                    if (val === "") continue;
+                    let v = parseInt(parseFloat(val));
+                    if (!(v in id_to_coord)) {
+                        id_to_coord[v] = { r: r + mapping[d].dr, c: c + mapping[d].dc };
+                        q.push(v);
+                    }
+                }
+            }
+
+            node_ids.forEach(u => { prize_val[u] = 0; prize_bit[u] = -1; });
+
+            let sr = id_to_coord[start_node].r;
+            let sc = id_to_coord[start_node].c;
+
+            prize_nodes.forEach(node => {
+                if (id_to_coord[node]) {
+                    let dist = Math.abs(id_to_coord[node].r - sr) + Math.abs(id_to_coord[node].c - sc);
+                    prize_val[node] = dist * 10;
+                    prize_bit[node] = num_prizes;
+                    num_prizes++;
+                }
+            });
+
+            all_prizes_mask = (1 << num_prizes) - 1;
+        }
+
+        function dfs(u, k, state) {
+            if (k === 0) return 0;
+            if (state === all_prizes_mask) return 0;
+            let stateKey = `${u},${k},${state}`;
+            if (stateKey in memo) return memo[stateKey];
+
+            let max_future_score = 0;
+            let best_v = -1;
+
+            for (let i = 0; i < adj[u].length; i++) {
+                let next_node = adj[u][i];
+                let next_state = state;
+                let gained_score = 0;
+                let bit = prize_bit[next_node];
+
+                if (bit !== -1 && !(state & (1 << bit))) {
+                    next_state |= (1 << bit);
+                    gained_score = prize_val[next_node];
+                }
+
+                let future_score = dfs(next_node, k - 1, next_state);
+
+                if (gained_score + future_score >= max_future_score) {
+                    max_future_score = gained_score + future_score;
+                    best_v = next_node;
+                }
+            }
+
+            best_next[stateKey] = best_v;
+            memo[stateKey] = max_future_score;
+            return max_future_score;
+        }
+
+        function calculateAutoPath() {
+            if (mazeDataRows.length === 0) {
+                alert("請先匯入 CSV 地圖檔！");
+                return;
+            }
+
+            // 讀取 UI 設定
+            let startNode = parseInt(document.getElementById('startNode').value);
+            let initDir = parseInt(document.getElementById('initialDir').value);
+            let totalSteps = parseInt(document.getElementById('totalSteps').value);
+            let pStr = document.getElementById('prizeNodes').value;
+            let prizeNodes = pStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+
+            try {
+                // 1. 建立地圖圖論
+                build_graph(startNode, prizeNodes);
+                // 2. 跑 DFS 找出最佳解
+                let max_score = dfs(startNode, totalSteps, 0);
+
+                // 3. 還原路徑
+                let curr = startNode;
+                let k = totalSteps;
+                let state = 0;
+                let path = [curr];
+
+                while (k > 0) {
+                    if (state === all_prizes_mask) break;
+                    let stateKey = `${curr},${k},${state}`;
+                    if (!(stateKey in best_next)) break;
+                    
+                    let nxt = best_next[stateKey];
+                    if (nxt === -1) break;
+
+                    path.push(nxt);
+                    let bit = prize_bit[nxt];
+                    if (bit !== -1 && !(state & (1 << bit))) {
+                        state |= (1 << bit);
+                    }
+                    curr = nxt;
+                    k--;
+                }
+
+                // 4. 轉換為字元指令
+                let car_commands = "";
+                let current_dir = initDir;
+                let sim_state = 0;
+
+                for (let i = 0; i < path.length - 1; i++) {
+                    let u = path[i];
+                    let v = path[i + 1];
+                    let r1 = id_to_coord[u].r; let c1 = id_to_coord[u].c;
+                    let r2 = id_to_coord[v].r; let c2 = id_to_coord[v].c;
+
+                    let target_dir = -1;
+                    if (r2 < r1) target_dir = 0;
+                    else if (c2 > c1) target_dir = 1;
+                    else if (r2 > r1) target_dir = 2;
+                    else if (c2 < c1) target_dir = 3;
+
+                    let turn = (target_dir - current_dir + 4) % 4;
+
+                    if (turn === 0) car_commands += "F";
+                    else if (turn === 1) car_commands += "R";
+                    else if (turn === 2) car_commands += "U";
+                    else if (turn === 3) car_commands += "L";
+
+                    let bit = prize_bit[v];
+                    if (bit !== -1 && !(sim_state & (1 << bit))) {
+                        car_commands += "S";
+                        sim_state |= (1 << bit);
+                    }
+
+                    current_dir = target_dir;
+                }
+
+                // 更新 UI
+                document.getElementById('pathResult').classList.remove('hidden');
+                document.getElementById('scoreOut').innerText = max_score;
+                document.getElementById('pathOut').innerText = path.join(" ➔ ");
+                document.getElementById('cmdOut').innerText = car_commands || "(無)";
+                
+                // 自動將指令填入發送框
+                document.getElementById('seqInput').value = car_commands;
+
+                logMsg("✅ 成功計算最佳路徑並轉為指令！", "SYS");
+
+            } catch (err) {
+                alert("計算過程發生錯誤，請確認輸入參數是否與 CSV 匹配。錯誤訊息: " + err);
+            }
+        }
+
+
+        // ==========================================
+        // 藍牙通訊與車輛控制區
+        // ==========================================
         const SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
         const CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
 
@@ -135,7 +427,6 @@
         const rfidLatestEl = document.getElementById('rfidLatest');
         const rfidListEl = document.getElementById('rfidList');
 
-        // --- UI 輔助函式 ---
         function logMsg(msg, type="SYS") {
             const time = new Date().toLocaleTimeString();
             let prefix = "⚙️ [SYS]";
@@ -212,7 +503,8 @@
             }
             try {
                 const encoder = new TextEncoder();
-                // HM-10 預設一次最多發送 20 bytes，若超長需分段發送，但我們的指令都很短
+                // 若字串很長，可以考慮分段發送，但 80步通常在 20 bytes 以內，或由底層自動切分
+                // 如果遇到長度超過發送失敗，可將字串每 20 個字元切成陣列用 for loop 傳送
                 await gattCharacteristic.writeValue(encoder.encode(dataStr));
                 logMsg(dataStr, "TX");
             } catch (error) {
@@ -226,9 +518,7 @@
             const value = decoder.decode(event.target.value);
             receiveBuffer += value;
 
-            // 如果有換行符號，代表一句話結束
             let lines = receiveBuffer.split(/\r?\n/);
-            // 保留最後一個可能還沒收完的片段
             receiveBuffer = lines.pop();
 
             for (let line of lines) {
@@ -238,7 +528,6 @@
             }
         }
 
-        // 解析收到的每一行訊息
         function processIncomingMessage(msg) {
             if (msg.startsWith("UID:")) {
                 const uid = msg.split(":")[1];
@@ -261,15 +550,25 @@
             let seq = document.getElementById('seqInput').value.trim().toUpperCase();
             if (!seq) return;
             
-            // 驗證字元
             const valid = /^[LRUFSC]+$/.test(seq);
             if (!valid) {
                 alert("指令只能包含 L, R, U, F, S, C！");
                 return;
             }
-            sendData(seq);
+            
+            // 分段發送，防止 HM-10 緩衝區溢位 (每段 20 字元)
+            sendLongString(seq);
+            
             document.getElementById('seqInput').value = "";
             if (seq.includes('C')) clearRFID();
+        }
+        
+        async function sendLongString(str) {
+            for (let i = 0; i < str.length; i += 15) {
+                let chunk = str.substring(i, i + 15);
+                await sendData(chunk);
+                await new Promise(r => setTimeout(r, 100)); // 稍等 100ms 避免藍牙塞車
+            }
         }
 
         function sendParam(param, inputId) {
@@ -284,9 +583,8 @@
             rfidCountEl.innerText = `總掃描次數: ${rfidRecords.length}`;
             rfidLatestEl.innerText = `最新: ${uid}`;
             
-            // 新增列表項目
             rfidListEl.innerHTML += `<div class="border-b border-slate-200 py-1">#${rfidRecords.length} - UID: ${uid}</div>`;
-            rfidListEl.scrollTop = rfidListEl.scrollHeight; // 滾動到底部
+            rfidListEl.scrollTop = rfidListEl.scrollHeight;
         }
 
         function clearRFID() {
