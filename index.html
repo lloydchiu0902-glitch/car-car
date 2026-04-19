@@ -359,7 +359,7 @@
                 </div>
 
                 <!-- 轉彎延遲 -->
-                <div>
+                <div class="mb-6">
                     <div class="text-xs text-gray-400 pl-1 mb-1">轉彎延遲 (ms)</div>
                     <div class="setting-row">
                         <div class="flex items-center gap-4 w-1/2">
@@ -381,6 +381,17 @@
                             <input type="number" id="inpZ" value="605" class="win-input w-full">
                         </div>
                         <button onclick="sendParam('Z', 'inpZ')" class="btn-secondary">套用</button>
+                    </div>
+                </div>
+
+                <!-- 參數調整歷史紀錄 -->
+                <div class="setting-row flex-col items-stretch p-0 overflow-hidden">
+                    <div class="flex justify-between items-center p-3 border-b border-win-border bg-win-hover/30">
+                        <span class="text-xs text-gray-400">參數調整紀錄</span>
+                        <button onclick="clearParamLog()" class="text-xs text-gray-400 hover:text-white flex items-center gap-1"><i data-lucide="eraser" class="w-3 h-3"></i> 清除</button>
+                    </div>
+                    <div id="paramLog" class="h-32 overflow-y-auto p-3 text-xs font-mono text-gray-300 space-y-1 bg-black/20">
+                        <span class="text-gray-500" id="paramEmptyText">暫無紀錄...</span>
                     </div>
                 </div>
             </div>
@@ -657,6 +668,7 @@
         const rfidCountEl = document.getElementById('rfidCount');
         const rfidLatestEl = document.getElementById('rfidLatest');
         const rfidListEl = document.getElementById('rfidList');
+        const paramLogEl = document.getElementById('paramLog');
 
         function logMsg(msg, type="SYS") {
             const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
@@ -797,6 +809,33 @@
             const val = document.getElementById(inputId).value;
             if (val === "") return;
             sendData(param + val);
+            
+            // 寫入參數歷史紀錄
+            logParamChange(param, val);
+        }
+
+        function logParamChange(param, val) {
+            const emptyText = document.getElementById('paramEmptyText');
+            if (emptyText) emptyText.remove(); // 移除"暫無紀錄"提示
+
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
+            
+            const paramNames = {
+                'P': 'Kp', 'I': 'Ki', 'D': 'Kd',
+                'X': '左轉(X)延遲', 'Y': '右轉(Y)延遲', 'Z': '迴轉(Z)延遲'
+            };
+            const pName = paramNames[param] || param;
+
+            let item = document.createElement('div');
+            item.className = "flex items-center justify-between py-1 border-b border-white/5";
+            item.innerHTML = `<span class="text-gray-500">[${time}]</span> <span class="text-gray-200">設定 <span class="text-win-primary font-bold">${pName}</span> = ${val}</span>`;
+            
+            paramLogEl.appendChild(item);
+            paramLogEl.scrollTop = paramLogEl.scrollHeight;
+        }
+
+        function clearParamLog() {
+            paramLogEl.innerHTML = '<span class="text-gray-500" id="paramEmptyText">暫無紀錄...</span>';
         }
 
         function updateRFID(uid) {
