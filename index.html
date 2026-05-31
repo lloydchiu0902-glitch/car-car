@@ -3,459 +3,519 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NTNU 統計作業導航儀表板</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <!-- Chosen Palette: Warm Neutrals & Academic Blue/Emerald (bg-stone-50, text-slate-800, blue-600, emerald-600) -->
-    <!-- Application Structure Plan: The SPA uses a vertical scrolling dashboard structure with sticky navigation. It is divided into five main thematic sections corresponding to the assignment's four questions and the final checklist. This linear but navigable structure aligns with a student's workflow (tackling one question at a time). Within each section, interactive tabs hide/reveal technical SPSS steps (Data, Steps, Syntax) to prevent cognitive overload, while interactive charts immediately present the visual intuition of the data (the "why" behind the stats). -->
-    <!-- Visualization & Content Choices: 
-         - Q1: Bar Chart (Chart.js) -> Compare independent groups (Light x Sound) -> Shows the massive interaction effect in 'Strong+Noise' intuitively. 
-         - Q2: Line Chart (Chart.js) -> Show repeated measures across conditions -> Highlights within-subject changes.
-         - Q3: Line Chart (Chart.js) -> Show longitudinal mixed design (Years x Group) -> Specifically fulfills the assignment's requirement to plot the interaction.
-         - Q4: Text Layout -> Highlight interpretation -> Focuses on reading comprehension of stats.
-         - Checklist: Interactive HTML toggles -> Task management -> Encourages active completion.
-         - NO SVG/Mermaid JS used. UI icons use Unicode characters. -->
-    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <title>Castella Streaming Player</title>
     <style>
-        .chart-container { 
-            position: relative; 
-            width: 100%; 
-            max-width: 600px; 
-            margin-left: auto; 
-            margin-right: auto; 
-            height: 300px; 
-            max-height: 400px; 
+        body {
+            background-color: #020617;
+            color: #f8fafc;
+            font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #020617 70%);
         }
-        @media (min-width: 768px) { 
-            .chart-container { height: 350px; } 
+        .bento-box {
+            background-color: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(10px);
+            border: 1px solid #334155;
+            border-radius: 16px;
+            padding: 25px;
+            width: 90%;
+            max-width: 450px;
+            box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.7);
         }
-        html { scroll-behavior: smooth; }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        .tab-btn.active { border-bottom: 2px solid #2563eb; color: #2563eb; font-weight: 600; }
-        .checklist-item.done { text-decoration: line-through; color: #9ca3af; }
+        h1 {
+            color: #f8fafc;
+            font-size: 1.4rem;
+            margin-top: 0;
+            text-align: center;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .card {
+            background-color: rgba(30, 41, 59, 0.7);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: 1px solid #334155;
+        }
+        
+        /* 藍牙按鈕 */
+        #btnConnect {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            color: white;
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+        #btnConnect:hover { transform: translateY(-2px); box-shadow: 0 6px 15px rgba(59, 130, 246, 0.4); }
+        #btnConnect:active { transform: translateY(0); }
+        
+        /* 歌單列表 */
+        .playlist-header {
+            font-size: 14px;
+            color: #94a3b8;
+            margin-bottom: 10px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .playlist {
+            max-height: 180px;
+            overflow-y: auto;
+            border-radius: 8px;
+            background-color: rgba(15, 23, 42, 0.5);
+        }
+        /* 自訂卷軸 */
+        .playlist::-webkit-scrollbar { width: 6px; }
+        .playlist::-webkit-scrollbar-thumb { background-color: #475569; border-radius: 3px; }
+        
+        .song-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            border-bottom: 1px solid #334155;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .song-item:last-child { border-bottom: none; }
+        .song-item:hover { background-color: rgba(51, 65, 85, 0.5); }
+        .song-item.active { background-color: rgba(56, 189, 248, 0.15); border-left: 3px solid #38bdf8; }
+        
+        .song-icon {
+            font-size: 24px;
+            margin-right: 12px;
+        }
+        .song-info-list {
+            flex-grow: 1;
+        }
+        .song-title-list { font-weight: bold; color: #e2e8f0; font-size: 14px; margin-bottom: 4px; }
+        .song-artist-list { font-size: 12px; color: #94a3b8; }
+        
+        /* 新增本機歌曲按鈕 */
+        .add-local-btn {
+            display: inline-block;
+            padding: 6px 12px;
+            background-color: rgba(139, 92, 246, 0.2);
+            color: #c4b5fd;
+            border: 1px solid #8b5cf6;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .add-local-btn:hover {
+            background-color: #8b5cf6;
+            color: white;
+        }
+        input[type="file"] { display: none; }
+        
+        /* 播放器控制台 */
+        .player-card {
+            background: linear-gradient(to bottom, #1e293b, #0f172a);
+        }
+        .now-playing {
+            text-align: center;
+            margin-bottom: 15px;
+        }
+        .np-title { font-size: 18px; font-weight: bold; color: #f8fafc; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+        .np-status { font-size: 12px; color: #38bdf8; }
+        
+        /* 進度條 */
+        .progress-container {
+            width: 100%;
+            height: 6px;
+            background-color: #334155;
+            border-radius: 3px;
+            margin: 15px 0;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #8b5cf6, #38bdf8);
+            border-radius: 3px;
+            transition: width 0.1s linear;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+        }
+        .btn-ctrl {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: none;
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: white;
+        }
+        .btn-ctrl:disabled { opacity: 0.3; cursor: not-allowed; transform: none !important; }
+        
+        #btnPlay { background-color: #10b981; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4); }
+        #btnPlay:hover:not(:disabled) { transform: scale(1.05); background-color: #059669; }
+        #btnPlay:active:not(:disabled) { transform: scale(0.95); }
+        
+        #btnStop { background-color: #ef4444; width: 50px; height: 50px; font-size: 18px; margin-top: 5px;}
+        #btnStop:hover:not(:disabled) { transform: scale(1.05); }
+
+        .log-area {
+            background-color: #020617;
+            border-radius: 8px;
+            padding: 10px;
+            height: 80px;
+            overflow-y: auto;
+            font-size: 11px;
+            color: #64748b;
+            font-family: monospace;
+            margin-top: 15px;
+        }
     </style>
 </head>
-<body class="bg-stone-50 text-slate-800 font-sans antialiased selection:bg-blue-200 selection:text-blue-900">
+<body>
 
-    <nav class="sticky top-0 bg-white shadow-sm z-50 border-b border-stone-200">
-        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between h-16">
-                <div class="flex items-center space-x-2">
-                    <span class="text-2xl font-bold text-blue-700">&#128200;</span>
-                    <span class="font-bold text-lg tracking-tight">NTNU EduStats 導航</span>
-                </div>
-                <div class="hidden md:flex items-center space-x-6 text-sm font-medium text-slate-600">
-                    <a href="#q1" class="hover:text-blue-600 transition-colors">Q1: 獨立樣本</a>
-                    <a href="#q2" class="hover:text-blue-600 transition-colors">Q2: 重複測量</a>
-                    <a href="#q3" class="hover:text-blue-600 transition-colors">Q3: 混合設計</a>
-                    <a href="#q4" class="hover:text-blue-600 transition-colors">Q4: 報表解讀</a>
-                    <a href="#checklist" class="hover:text-emerald-600 transition-colors">繳交清單</a>
-                </div>
+    <div class="bento-box">
+        <h1>📻 Castella 串流播放平台</h1>
+        
+        <!-- 步驟一：藍牙連線 -->
+        <div>
+            <button id="btnConnect">1. 🔗 連接實體樂器 (BLE)</button>
+        </div>
+
+        <!-- 步驟二：串流歌單 (Spotify-like) -->
+        <div class="card" style="margin-top: 15px;">
+            <div class="playlist-header">
+                <span>📚 我的歌單</span>
+                <label class="add-local-btn">
+                    <input type="file" id="fileInput" accept=".json" multiple>
+                    ➕ 加入本機檔案
+                </label>
+            </div>
+            <div class="playlist" id="playlistContainer">
+                <!-- 歌單會由 JavaScript 動態生成 -->
             </div>
         </div>
-    </nav>
 
-    <header class="bg-white border-b border-stone-200 py-12">
-        <div class="max-w-4xl mx-auto px-4 text-center">
-            <h1 class="text-3xl md:text-5xl font-extrabold text-slate-900 mb-4 tracking-tight">教育統計學作業二：SPSS 實戰攻略</h1>
-            <p class="text-lg text-slate-600 leading-relaxed max-w-2xl mx-auto">
-                專為 2026 Spring 課程設計的互動式儀表板。這裡整合了資料輸入邏輯、SPSS 操作步驟、關鍵語法與資料視覺化，幫助您快速理解多因子變異數分析 (ANOVA) 的核心概念。
-            </p>
+        <!-- 步驟三：媒體播放器 -->
+        <div class="card player-card">
+            <div class="now-playing">
+                <div class="np-title" id="npTitle">尚未選擇歌曲</div>
+                <div class="np-status" id="npStatus">請先連線並從上方選擇歌曲</div>
+            </div>
+            
+            <div class="progress-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+
+            <div class="controls">
+                <button class="btn-ctrl" id="btnStop" disabled>⏹</button>
+                <button class="btn-ctrl" id="btnPlay" disabled>▶</button>
+            </div>
         </div>
-    </header>
-
-    <main class="max-w-6xl mx-auto px-4 py-12 space-y-16">
-
-        <section id="q1" class="scroll-mt-24">
-            <div class="bg-white rounded-2xl shadow-sm border border-stone-200 p-6 md:p-8">
-                <div class="mb-6">
-                    <div class="inline-flex items-center justify-center px-3 py-1 rounded-full bg-blue-100 text-blue-700 text-xs font-bold uppercase tracking-wide mb-3">Question 1</div>
-                    <h2 class="text-2xl font-bold text-slate-900">兩因子獨立樣本變異數分析</h2>
-                    <p class="mt-3 text-slate-600 leading-relaxed">
-                        本區塊旨在探討「光線強度」（弱、中、強）與「聲音環境」（噪音、安靜）對失眠患者睡眠潛伏期 (SOL) 的影響。透過圖表與 SPSS 步驟，您將學習如何處理 30 位隨機分派參與者的資料，並檢驗兩因子之間的交互作用。
-                    </p>
-                </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-                    <div class="bg-stone-50 rounded-xl p-4 border border-stone-100">
-                        <h3 class="font-semibold text-slate-800 mb-2 flex items-center gap-2">
-                            <span>&#128202;</span> 樣本平均數視覺化
-                        </h3>
-                        <p class="text-sm text-slate-500 mb-4">觀察資料：強光加上噪音環境，導致睡眠潛伏期產生巨大的交互作用飆升。</p>
-                        <div class="chart-container">
-                            <canvas id="q1Chart"></canvas>
-                        </div>
-                    </div>
-
-                    <div>
-                        <div class="flex border-b border-stone-200 mb-4">
-                            <button class="tab-btn active px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-800 focus:outline-none" onclick="switchTab('q1', 'data')">資料輸入</button>
-                            <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-800 focus:outline-none" onclick="switchTab('q1', 'steps')">操作步驟</button>
-                            <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-800 focus:outline-none" onclick="switchTab('q1', 'syntax')">關鍵語法</button>
-                        </div>
-
-                        <div id="q1-data" class="tab-content active text-sm text-slate-700 space-y-3">
-                            <p>在 SPSS 建立三個變數，共 30 列：</p>
-                            <ul class="list-disc pl-5 space-y-1">
-                                <li><strong>Light (光線)：</strong> 1=Weak, 2=Moderate, 3=Strong</li>
-                                <li><strong>Sound (聲音)：</strong> 1=Noise, 2=Quiet</li>
-                                <li><strong>SOL (睡眠時間)：</strong> 連續數值</li>
-                            </ul>
-                            <div class="bg-stone-100 p-3 rounded-lg mt-2 overflow-x-auto text-xs font-mono">
-                                <p>1-5人 (Weak+Noise): 29, 30, 30, 40, 51</p>
-                                <p>6-10人 (Mod+Noise): 21, 39, 32, 44, 44</p>
-                                <p>11-15人 (Strong+Noise): 210, 252, 200, 410, 403</p>
-                                <p>16-20人 (Weak+Quiet): 20, 31, 32, 42, 52</p>
-                                <p>...</p>
-                            </div>
-                        </div>
-
-                        <div id="q1-steps" class="tab-content text-sm text-slate-700 space-y-3">
-                            <ol class="list-decimal pl-5 space-y-2">
-                                <li>點擊 <strong>分析 > 一般線性模型 > 單變量</strong>。</li>
-                                <li>依變數放入 <code>SOL</code>；固定因子放入 <code>Light</code> 與 <code>Sound</code>。</li>
-                                <li><strong>圖形：</strong> <code>Light</code> 放水平軸，<code>Sound</code> 放分開的線，按「新增」。</li>
-                                <li><strong>選項：</strong> 勾選「描述性統計」、「效應量估計值」。</li>
-                                <li>點擊「貼上」，進入語法編輯器準備加入簡單主效應分析。</li>
-                            </ol>
-                        </div>
-
-                        <div id="q1-syntax" class="tab-content text-sm text-slate-700 space-y-3">
-                            <p>作業要求若有交互作用，需檢定每一種光線強度下聲音的影響。請在語法中加入 COMPARE：</p>
-                            <div class="bg-slate-800 text-green-400 p-4 rounded-lg font-mono text-xs overflow-x-auto">
-                                UNIANOVA SOL BY Light Sound<br>
-                                &nbsp;&nbsp;/PLOT=PROFILE(Light*Sound)<br>
-                                &nbsp;&nbsp;/PRINT=DESCRIPTIVE ETASQ<br>
-                                <span class="bg-blue-900 text-white px-1">&nbsp;&nbsp;/EMMEANS=TABLES(Light*Sound) COMPARE(Sound) ADJ(BONFERRONI)</span><br>
-                                &nbsp;&nbsp;/DESIGN=Light Sound Light*Sound.
-                            </div>
-                            <p class="text-xs text-slate-500 mt-2">反白整段語法，點擊綠色三角形執行。</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section id="q2" class="scroll-mt-24">
-            <div class="bg-white rounded-2xl shadow-sm border border-stone-200 p-6 md:p-8">
-                <div class="mb-6">
-                    <div class="inline-flex items-center justify-center px-3 py-1 rounded-full bg-blue-100 text-blue-700 text-xs font-bold uppercase tracking-wide mb-3">Question 2</div>
-                    <h2 class="text-2xl font-bold text-slate-900">兩因子重複測量變異數分析</h2>
-                    <p class="mt-3 text-slate-600 leading-relaxed">
-                        本區塊展示同一群參與者（5人）經歷 4 種不同實驗室條件的睡眠潛伏期變化。透過折線圖，您可以清楚看到同一個體在「暗/亮」與「吵/安靜」情境下的表現波動，並學習 SPSS 重複測量設計的操作。
-                    </p>
-                </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
-                    <div class="order-2 lg:order-1">
-                        <div class="flex border-b border-stone-200 mb-4">
-                            <button class="tab-btn active px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-800 focus:outline-none" onclick="switchTab('q2', 'data')">資料輸入</button>
-                            <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-800 focus:outline-none" onclick="switchTab('q2', 'steps')">操作設定</button>
-                        </div>
-
-                        <div id="q2-data" class="tab-content active text-sm text-slate-700 space-y-3">
-                            <p>這是受試者內設計，每一橫列代表一位受試者，共 5 列。建立 4 個變數欄位：</p>
-                            <div class="bg-stone-100 p-3 rounded-lg overflow-x-auto text-xs font-mono">
-                                <table class="w-full text-left">
-                                    <thead><tr><th class="pb-2">ID</th><th class="pb-2">D_N (Dark+Noisy)</th><th class="pb-2">D_Q (Dark+Quiet)</th><th class="pb-2">L_N (Light+Noisy)</th><th class="pb-2">L_Q (Light+Quiet)</th></tr></thead>
-                                    <tbody>
-                                        <tr><td>1</td><td>2.10</td><td>0.30</td><td>3.00</td><td>3.20</td></tr>
-                                        <tr><td>2</td><td>3.00</td><td>0.80</td><td>8.00</td><td>8.10</td></tr>
-                                        <tr><td>3</td><td>3.20</td><td>0.50</td><td>5.00</td><td>5.92</td></tr>
-                                        <tr><td>4</td><td>2.20</td><td>2.00</td><td>6.00</td><td>6.00</td></tr>
-                                        <tr><td>5</td><td>4.80</td><td>0.90</td><td>9.00</td><td>9.00</td></tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div id="q2-steps" class="tab-content text-sm text-slate-700 space-y-3">
-                            <ol class="list-decimal pl-5 space-y-2">
-                                <li>點擊 <strong>分析 > 一般線性模型 > 重複測量</strong>。</li>
-                                <li>定義受試者內因子：新增因子 <code>Light</code> (層次2) 與 <code>Sound</code> (層次2)。</li>
-                                <li>進入定義畫面，依序拉入欄位：<br>(1,1)=D_N, (1,2)=D_Q, (2,1)=L_N, (2,2)=L_Q。</li>
-                                <li>點擊「貼上」，加入語法：<br><code>/EMMEANS=TABLES(Light*Sound) COMPARE(Sound)</code></li>
-                            </ol>
-                        </div>
-                    </div>
-
-                    <div class="bg-stone-50 rounded-xl p-4 border border-stone-100 order-1 lg:order-2">
-                         <h3 class="font-semibold text-slate-800 mb-2 flex items-center gap-2">
-                            <span>&#128202;</span> 實驗情境趨勢比較
-                        </h3>
-                        <p class="text-sm text-slate-500 mb-4">整體而言，光線(Light)對延遲睡眠的影響似乎比聲音(Sound)更大。</p>
-                        <div class="chart-container">
-                            <canvas id="q2Chart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section id="q3" class="scroll-mt-24">
-            <div class="bg-white rounded-2xl shadow-sm border border-stone-200 p-6 md:p-8">
-                <div class="mb-6">
-                    <div class="inline-flex items-center justify-center px-3 py-1 rounded-full bg-blue-100 text-blue-700 text-xs font-bold uppercase tracking-wide mb-3">Question 3</div>
-                    <h2 class="text-2xl font-bold text-slate-900">混合設計變異數分析與交互作用圖</h2>
-                    <p class="mt-3 text-slate-600 leading-relaxed">
-                        本區塊展示縱向研究（測量三年）結合組間設計（介入組 vs 控制組）的混合分析。作業特別要求繪製「交互作用圖」，下方的動態折線圖即為資料視覺化的成果，協助您解釋簡單主效應。
-                    </p>
-                </div>
-
-                <div class="bg-stone-50 rounded-xl p-4 border border-stone-100 mb-8">
-                    <h3 class="font-semibold text-slate-800 mb-2 text-center">
-                        <span>&#128202;</span> 三年間數學技能進步幅度交互作用圖
-                    </h3>
-                    <div class="chart-container">
-                        <canvas id="q3Chart"></canvas>
-                    </div>
-                    <p class="text-center text-sm text-slate-500 mt-4">圖表顯示：控制組在第三年 (Year 3) 產生了異常的巨大進步，形成顯著交互作用。</p>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div class="bg-white border border-stone-200 rounded-lg p-5">
-                        <h4 class="font-bold text-slate-800 mb-3 border-b pb-2">1. 資料架構 (共8列)</h4>
-                        <ul class="text-sm text-slate-600 space-y-2 list-disc pl-5">
-                            <li>組間變數 <code>Group</code>: 1=介入組, 2=控制組</li>
-                            <li>組內變數 <code>Y1</code>, <code>Y2</code>, <code>Y3</code>: 各年度分數</li>
-                        </ul>
-                    </div>
-                    <div class="bg-white border border-stone-200 rounded-lg p-5">
-                        <h4 class="font-bold text-slate-800 mb-3 border-b pb-2">2. SPSS 操作重點</h4>
-                        <ul class="text-sm text-slate-600 space-y-2 list-disc pl-5">
-                            <li>定義組內因子 <code>Year</code> (層次: 3)。</li>
-                            <li><code>Y1-Y3</code> 放入受試者內變數；<code>Group</code> 放入受試者間因子。</li>
-                            <li><strong>圖形設定：</strong> <code>Year</code> 放水平軸，<code>Group</code> 放分開的線。</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section id="q4" class="scroll-mt-24">
-            <div class="bg-blue-900 rounded-2xl shadow-lg p-6 md:p-10 text-white relative overflow-hidden">
-                <div class="absolute top-0 right-0 -mr-16 -mt-16 opacity-10 text-9xl">&#9997;</div>
-                <div class="relative z-10">
-                    <div class="inline-flex items-center justify-center px-3 py-1 rounded-full bg-blue-800 text-blue-200 text-xs font-bold uppercase tracking-wide mb-4 border border-blue-700">Question 4</div>
-                    <h2 class="text-2xl md:text-3xl font-bold mb-4">報表解讀與結果解釋</h2>
-                    <p class="text-blue-200 mb-8 max-w-3xl leading-relaxed">
-                        本區塊無需操作軟體，測驗核心在於判讀既有 SPSS 報表。需特別留意題幹中的變數陷阱，並根據「Tests of Between/Within-Subjects Effects」與「Univariate Tests」撰寫嚴謹的統計推論。
-                    </p>
-
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        <div class="bg-white/10 rounded-xl p-5 backdrop-blur-sm border border-white/20">
-                            <h3 class="font-bold text-blue-100 mb-2">4.1 統計方法</h3>
-                            <p class="text-sm text-blue-50 leading-relaxed">
-                                使用 <strong>二因子混合設計 ANOVA</strong>。包含受試者間因子 (MUgroup) 與受試者內因子 (problem_type)。
-                            </p>
-                        </div>
-                        <div class="bg-white/10 rounded-xl p-5 backdrop-blur-sm border border-white/20">
-                            <h3 class="font-bold text-blue-100 mb-2">4.2 顯著性判讀</h3>
-                            <p class="text-sm text-blue-50 leading-relaxed">
-                                problem_type 主效應顯著 (p &lt; .001)。<br>
-                                MUgroup 主效應顯著 (p = .001)。<br>
-                                兩者交互作用顯著 (p = .001)。需執行<strong>簡單主效應分析</strong>。
-                            </p>
-                        </div>
-                        <div class="bg-white/10 rounded-xl p-5 backdrop-blur-sm border border-white/20 md:col-span-3">
-                            <h3 class="font-bold text-blue-100 mb-2">4.3 結果解釋精要 <span class="text-yellow-300 text-xs ml-2">※注意老師題幹錯字陷阱</span></h3>
-                            <p class="text-sm text-blue-50 leading-relaxed">
-                                根據 Univariate Tests，在最簡單的 2x1 題型下，高低記憶更新(MU)組的反應時間無顯著差異 (p = .086)。然而，隨著題型難度增加 (3x1, 4x1, 2x2)，高低組別差異均達顯著 (p &lt; .05)。高 MU 能力的學生在面對複雜心算時，其反應時間顯著快於低能力組。
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section id="checklist" class="scroll-mt-24 pb-20">
-            <div class="bg-white rounded-2xl shadow-sm border border-stone-200 p-6 md:p-8">
-                <h2 class="text-2xl font-bold text-slate-900 mb-2 flex items-center gap-2">
-                    <span class="text-emerald-500">&#10003;</span> 繳交前檢查清單
-                </h2>
-                <p class="text-slate-600 mb-6">請在提交 Moodle 前點擊確認各項要求。確保不遺漏任何評分重點。</p>
-                
-                <div class="space-y-3" id="checklist-container">
-                    <label class="flex items-start gap-4 p-4 rounded-lg border border-stone-200 hover:bg-stone-50 cursor-pointer transition-colors group">
-                        <div class="flex-shrink-0 mt-0.5">
-                            <input type="checkbox" class="w-5 h-5 rounded border-stone-300 text-emerald-600 focus:ring-emerald-500 transition-all cursor-pointer" onclick="toggleStrikeThrough(this)">
-                        </div>
-                        <div class="flex-1 checklist-item font-medium text-slate-800 transition-all">是否已將 SPSS 的 Tests of Between/Within-Subjects Effects 表格截圖？</div>
-                    </label>
-                    <label class="flex items-start gap-4 p-4 rounded-lg border border-stone-200 hover:bg-stone-50 cursor-pointer transition-colors group">
-                        <div class="flex-shrink-0 mt-0.5">
-                            <input type="checkbox" class="w-5 h-5 rounded border-stone-300 text-emerald-600 focus:ring-emerald-500 transition-all cursor-pointer" onclick="toggleStrikeThrough(this)">
-                        </div>
-                        <div class="flex-1 checklist-item font-medium text-slate-800 transition-all">是否已將 Pairwise Comparisons 或 Univariate Tests 表格截圖？</div>
-                    </label>
-                    <label class="flex items-start gap-4 p-4 rounded-lg border border-stone-200 hover:bg-stone-50 cursor-pointer transition-colors group">
-                        <div class="flex-shrink-0 mt-0.5">
-                            <input type="checkbox" class="w-5 h-5 rounded border-stone-300 text-emerald-600 focus:ring-emerald-500 transition-all cursor-pointer" onclick="toggleStrikeThrough(this)">
-                        </div>
-                        <div class="flex-1 checklist-item font-medium text-slate-800 transition-all">第三題是否附上交互作用 折線圖？</div>
-                    </label>
-                    <label class="flex items-start gap-4 p-4 rounded-lg border border-stone-200 hover:bg-stone-50 cursor-pointer transition-colors group">
-                        <div class="flex-shrink-0 mt-0.5">
-                            <input type="checkbox" class="w-5 h-5 rounded border-stone-300 text-emerald-600 focus:ring-emerald-500 transition-all cursor-pointer" onclick="toggleStrikeThrough(this)">
-                        </div>
-                        <div class="flex-1 checklist-item font-medium text-slate-800 transition-all">所有的 p 值解釋是否皆標註為 p &lt; .05 或 p &gt; .05？</div>
-                    </label>
-                    <label class="flex items-start gap-4 p-4 rounded-lg border border-stone-200 hover:bg-stone-50 cursor-pointer transition-colors group">
-                        <div class="flex-shrink-0 mt-0.5">
-                            <input type="checkbox" class="w-5 h-5 rounded border-stone-300 text-emerald-600 focus:ring-emerald-500 transition-all cursor-pointer" onclick="toggleStrikeThrough(this)">
-                        </div>
-                        <div class="flex-1 checklist-item font-medium text-slate-800 transition-all">最後檔案是否已匯出為 PDF 格式？</div>
-                    </label>
-                </div>
-            </div>
-        </section>
-
-    </main>
-
-    <footer class="bg-slate-900 py-8 text-center text-slate-400 text-sm">
-        <p>NTNU Educational Statistics Assignment 2 Interactive Guide</p>
-    </footer>
+        
+        <div class="log-area" id="logArea"></div>
+    </div>
 
     <script>
-        function switchTab(sectionId, tabName) {
-            const section = document.getElementById(sectionId);
-            const contents = section.querySelectorAll('.tab-content');
-            const btns = section.querySelectorAll('.tab-btn');
+        // ==========================================
+        // 0. 串流歌單資料庫 
+        // 預設展示用的雲端檔案。透過 UI 按鈕加入的檔案會動態推入此陣列。
+        // ==========================================
+        const PLAYLIST = [
+            { id: 1, title: "卡農 (Canon in D)", artist: "示範曲目 (需有檔案)", icon: "🎻", url: "songs/canon.json" },
+            { id: 2, title: "夜曲 (Nocturne Op.9 No.2)", artist: "示範曲目 (需有檔案)", icon: "🎹", url: "songs/nocturne.json" }
+        ];
+
+        const UART_SERVICE_UUID = 0xFFE0;
+        const UART_CHAR_UUID    = 0xFFE1;
+
+        let bluetoothDevice = null;
+        let gattCharacteristic = null;
+        let songData = null;
+        let isPlaying = false;
+        let songDurationUs = 0;
+        let startTimeUs = 0;
+        let animFrameId = null;
+
+        const ui = {
+            btnConnect: document.getElementById('btnConnect'),
+            playlistContainer: document.getElementById('playlistContainer'),
+            fileInput: document.getElementById('fileInput'),
+            npTitle: document.getElementById('npTitle'),
+            npStatus: document.getElementById('npStatus'),
+            progressBar: document.getElementById('progressBar'),
+            btnPlay: document.getElementById('btnPlay'),
+            btnStop: document.getElementById('btnStop'),
+            logArea: document.getElementById('logArea')
+        };
+
+        function log(msg, color = "#64748b") {
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 2 });
+            ui.logArea.innerHTML += `<div><span style="color:#334155;">[${time}]</span> <span style="color:${color}">${msg}</span></div>`;
+            ui.logArea.scrollTop = ui.logArea.scrollHeight;
+        }
+
+        // ==========================================
+        // 初始化與渲染歌單 UI
+        // ==========================================
+        function renderPlaylist() {
+            ui.playlistContainer.innerHTML = '';
+            PLAYLIST.forEach(song => {
+                const item = document.createElement('div');
+                item.className = 'song-item';
+                item.innerHTML = `
+                    <div class="song-icon">${song.icon}</div>
+                    <div class="song-info-list">
+                        <div class="song-title-list">${song.title}</div>
+                        <div class="song-artist-list">${song.artist}</div>
+                    </div>
+                `;
+                item.addEventListener('click', () => {
+                    document.querySelectorAll('.song-item').forEach(el => el.classList.remove('active'));
+                    item.classList.add('active');
+                    loadSong(song);
+                });
+                ui.playlistContainer.appendChild(item);
+            });
+        }
+        renderPlaylist();
+
+        // ==========================================
+        // 處理使用者加入本機檔案 (Bypassing 404 Error)
+        // ==========================================
+        ui.fileInput.addEventListener('change', (event) => {
+            const files = event.target.files;
+            if (!files.length) return;
+
+            Array.from(files).forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        if (!data.commands) throw new Error("這不是有效的 Castella JSON 檔案");
+                        
+                        const title = data.song_name || file.name.replace('.json', '');
+                        
+                        // 動態加入歌單記憶體中 (不需上傳伺服器)
+                        PLAYLIST.push({
+                            id: Date.now() + Math.random(),
+                            title: title,
+                            artist: "已載入記憶體",
+                            icon: "📁",
+                            localData: data // 直接將資料存在物件中
+                        });
+                        
+                        renderPlaylist();
+                        log(`✅ 已將 [${title}] 加入歌單！`, "#10b981");
+                        
+                    } catch (err) {
+                        log(`❌ 解析失敗 (${file.name}): ${err.message}`, "#ef4444");
+                    }
+                };
+                reader.readAsText(file);
+            });
+            // 重置 input 以便能重複選取同一個檔案
+            ui.fileInput.value = '';
+        });
+
+        // ==========================================
+        // 1. 藍牙連線管理
+        // ==========================================
+        ui.btnConnect.addEventListener('click', async () => {
+            try {
+                if (!navigator.bluetooth) throw new Error("瀏覽器不支援 Web Bluetooth API");
+                log("正在請求藍牙權限...", "#fbbf24");
+                
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [UART_SERVICE_UUID, '0000ffe0-0000-1000-8000-00805f9b34fb']
+                });
+
+                bluetoothDevice.addEventListener('gattserverdisconnected', () => {
+                    log("⚠️ 設備已斷開連線", "#ef4444");
+                    ui.btnConnect.innerText = "1. 🔗 重新連接樂器 (BLE)";
+                    ui.btnConnect.style.background = "linear-gradient(135deg, #ef4444, #b91c1c)";
+                    gattCharacteristic = null;
+                    checkPlayReady();
+                });
+
+                const server = await bluetoothDevice.gatt.connect();
+                const service = await server.getPrimaryService(UART_SERVICE_UUID);
+                gattCharacteristic = await service.getCharacteristic(UART_CHAR_UUID);
+
+                log("✅ 連線成功！硬體就緒", "#10b981");
+                ui.btnConnect.innerText = "✅ 樂器已連線";
+                ui.btnConnect.style.background = "linear-gradient(135deg, #10b981, #059669)";
+                checkPlayReady();
+
+            } catch (error) {
+                log(`❌ 連線失敗: ${error.message}`, "#ef4444");
+            }
+        });
+
+        // ==========================================
+        // 2. 處理歌曲載入 (支援 Fetch 網址或 Local 記憶體資料)
+        // ==========================================
+        async function loadSong(songObj) {
+            if (isPlaying) {
+                log("⚠️ 請先停止目前播放的歌曲", "#fbbf24");
+                return;
+            }
             
-            contents.forEach(c => c.classList.remove('active'));
-            btns.forEach(b => b.classList.remove('active'));
-            
-            document.getElementById(`${sectionId}-${tabName}`).classList.add('active');
-            
-            const btnIndex = ['data', 'steps', 'syntax'].indexOf(tabName);
-            if(btns[btnIndex]) {
-                btns[btnIndex].classList.add('active');
+            ui.npTitle.innerText = "⏳ 載入中...";
+            ui.npStatus.innerText = "正在讀取指令...";
+            ui.progressBar.style.width = "0%";
+            songData = null;
+            checkPlayReady();
+
+            try {
+                if (songObj.localData) {
+                    // 情況 A：播放使用者上傳的本機檔案 (直接從記憶體拿，不會發生 404)
+                    songData = songObj.localData;
+                    processLoadedSongData(songData.song_name || songObj.title);
+                } else {
+                    // 情況 B：播放伺服器上的串流檔案
+                    const response = await fetch(songObj.url);
+                    if (!response.ok) throw new Error(`HTTP 錯誤碼: ${response.status}`);
+                    songData = await response.json();
+                    processLoadedSongData(songData.song_name || songObj.title);
+                }
+            } catch (error) {
+                ui.npTitle.innerText = "❌ 載入失敗";
+                ui.npStatus.innerText = "找不到歌曲檔案";
+                log(`載入錯誤: ${error.message}`, "#ef4444");
             }
         }
 
-        function toggleStrikeThrough(checkbox) {
-            const labelText = checkbox.closest('label').querySelector('.checklist-item');
-            if (checkbox.checked) {
-                labelText.classList.add('done');
+        function processLoadedSongData(title) {
+            if (!songData.commands || songData.commands.length === 0) {
+                throw new Error("無效的 Castella 格式");
+            }
+            ui.npTitle.innerText = title;
+            ui.npStatus.innerText = `準備就緒 (${songData.total_commands} 個實體指令)`;
+            
+            // 計算總時長 (最後一個指令的時間)
+            songDurationUs = songData.commands[songData.commands.length - 1].t_us;
+            log(`✅ 成功載入: ${title} (時長: ${(songDurationUs/1000000).toFixed(1)}s)`, "#38bdf8");
+            checkPlayReady();
+        }
+
+        function checkPlayReady() {
+            if (gattCharacteristic && songData) {
+                ui.btnPlay.disabled = false;
+                if (!isPlaying) ui.npStatus.innerText = "✨ 準備演奏";
             } else {
-                labelText.classList.remove('done');
+                ui.btnPlay.disabled = true;
             }
         }
 
-        Chart.defaults.font.family = "'Inter', 'sans-serif'";
-        Chart.defaults.color = '#64748b';
+        // ==========================================
+        // 3. 高精度播放引擎與進度條動畫
+        // ==========================================
+        function updateProgressBar() {
+            if (!isPlaying) return;
+            const currentUs = (performance.now() * 1000) - startTimeUs;
+            const progress = Math.min((currentUs / songDurationUs) * 100, 100);
+            ui.progressBar.style.width = progress + '%';
+            
+            if (progress < 100) {
+                animFrameId = requestAnimationFrame(updateProgressBar);
+            }
+        }
 
-        const q1Ctx = document.getElementById('q1Chart').getContext('2d');
-        new Chart(q1Ctx, {
-            type: 'bar',
-            data: {
-                labels: ['Weak', 'Moderate', 'Strong'],
-                datasets: [
-                    {
-                        label: 'Noisy',
-                        data: [36, 36, 295],
-                        backgroundColor: 'rgba(59, 130, 246, 0.8)',
-                        borderRadius: 4
-                    },
-                    {
-                        label: 'Quiet',
-                        data: [35.4, 38.6, 38.4],
-                        backgroundColor: 'rgba(148, 163, 184, 0.6)',
-                        borderRadius: 4
+        ui.btnPlay.addEventListener('click', async () => {
+            if (!gattCharacteristic || !songData || isPlaying) return;
+            
+            isPlaying = true;
+            ui.btnPlay.disabled = true;
+            ui.btnStop.disabled = false;
+            ui.npStatus.innerText = "🎶 正在為您現場演奏...";
+            ui.npStatus.style.color = "#10b981";
+            log("▶ 開始播放", "#10b981");
+
+            const commands = songData.commands;
+            startTimeUs = performance.now() * 1000;
+            
+            // 啟動進度條動畫
+            if (animFrameId) cancelAnimationFrame(animFrameId);
+            animFrameId = requestAnimationFrame(updateProgressBar);
+
+            for (let i = 0; i < commands.length; i++) {
+                if (!isPlaying) break;
+
+                const cmd = commands[i];
+                const targetTimeUs = cmd.t_us;
+                let currentUs = (performance.now() * 1000) - startTimeUs;
+                
+                if (targetTimeUs > currentUs) {
+                    const waitMs = (targetTimeUs - currentUs) / 1000;
+                    if (waitMs > 5) {
+                        await new Promise(resolve => setTimeout(resolve, waitMs - 3));
                     }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { position: 'top' },
-                    tooltip: { mode: 'index', intersect: false }
-                },
-                scales: {
-                    y: { beginAtZero: true, title: { display: true, text: 'Mean SOL' } },
-                    x: { title: { display: true, text: 'Light Level' } }
+                    while (((performance.now() * 1000) - startTimeUs) < targetTimeUs) {
+                        if (!isPlaying) break;
+                    }
+                }
+
+                if (!isPlaying) break;
+
+                try {
+                    const packetArray = new Uint8Array(cmd.payload);
+                    await gattCharacteristic.writeValueWithoutResponse(packetArray);
+                } catch (e) {
+                    console.error("封包發送異常:", e);
                 }
             }
+
+            stopPlayback(true);
         });
 
-        const q2Ctx = document.getElementById('q2Chart').getContext('2d');
-        new Chart(q2Ctx, {
-            type: 'line',
-            data: {
-                labels: ['Dark', 'Light'],
-                datasets: [
-                    {
-                        label: 'Noisy',
-                        data: [3.06, 6.2],
-                        borderColor: '#3b82f6',
-                        backgroundColor: '#3b82f6',
-                        tension: 0.1,
-                        pointRadius: 6
-                    },
-                    {
-                        label: 'Quiet',
-                        data: [0.9, 6.444],
-                        borderColor: '#94a3b8',
-                        backgroundColor: '#94a3b8',
-                        tension: 0.1,
-                        pointRadius: 6,
-                        borderDash: [5, 5]
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { position: 'top' },
-                    tooltip: { mode: 'index', intersect: false }
-                },
-                scales: {
-                    y: { beginAtZero: true, title: { display: true, text: 'Mean SOL' } },
-                    x: { title: { display: true, text: 'Light Level' } }
-                }
-            }
-        });
+        ui.btnStop.addEventListener('click', () => stopPlayback(false));
 
-        const q3Ctx = document.getElementById('q3Chart').getContext('2d');
-        new Chart(q3Ctx, {
-            type: 'line',
-            data: {
-                labels: ['Year 1', 'Year 2', 'Year 3'],
-                datasets: [
-                    {
-                        label: 'Intervention Group',
-                        data: [4.5, 8.925, 5.0],
-                        borderColor: '#10b981',
-                        backgroundColor: '#10b981',
-                        tension: 0.3,
-                        pointRadius: 6
-                    },
-                    {
-                        label: 'Control Group',
-                        data: [5.75, 7.275, 47.5],
-                        borderColor: '#f59e0b',
-                        backgroundColor: '#f59e0b',
-                        tension: 0.3,
-                        pointRadius: 6
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { position: 'top' },
-                    tooltip: { mode: 'index', intersect: false }
-                },
-                scales: {
-                    y: { beginAtZero: true, title: { display: true, text: 'Improvement Score' } },
-                    x: { title: { display: true, text: 'Time' } }
+        function stopPlayback(isAutoFinish = false) {
+            isPlaying = false;
+            if (animFrameId) cancelAnimationFrame(animFrameId);
+            
+            ui.btnPlay.disabled = false;
+            ui.btnStop.disabled = true;
+            
+            if (isAutoFinish) {
+                ui.progressBar.style.width = '100%';
+                ui.npStatus.innerText = "✅ 演奏完畢";
+                ui.npStatus.style.color = "#94a3b8";
+                log("✅ 播放結束", "#94a3b8");
+            } else {
+                ui.npStatus.innerText = "⏹ 已停止播放";
+                ui.npStatus.style.color = "#ef4444";
+                log("⏹ 使用者中斷播放", "#ef4444");
+                
+                // 若被中斷，發送靜音指令給所有馬達
+                if (gattCharacteristic) {
+                    try {
+                        const stopPacket = new Uint8Array([0xFE, 0xFE, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                        // gattCharacteristic.writeValueWithoutResponse(stopPacket);
+                    } catch (e) {}
                 }
             }
-        });
+        }
     </script>
 </body>
 </html>
